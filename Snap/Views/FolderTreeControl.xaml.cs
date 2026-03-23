@@ -27,6 +27,9 @@ public partial class FolderTreeControl : UserControl
     {
         if (e.OriginalSource is TreeViewItem tvi && tvi.DataContext is TreeNode node && ViewModel != null)
         {
+            // Auto-scroll to selected node
+            tvi.BringIntoView();
+
             // プログラムからの同期中（SyncToPathAsync）はペインへのナビゲーションを発火しない
             if (!ViewModel.IsSyncing)
                 ViewModel.OnNodeSelected(node);

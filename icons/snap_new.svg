@@ -5,50 +5,40 @@
   fill="none"
   xmlns="http://www.w3.org/2000/svg"
 >
-  <!-- 背景角丸 - ダークグレー（パディング最小化） -->
-  <rect x="4" y="4" width="248" height="248" rx="40" ry="40" fill="#2a2a2a" />
-  <rect x="4" y="4" width="248" height="248" rx="40" ry="40" fill="url(#bgSubtle)" />
-
   <!-- フォルダ タブ -->
   <path
-    d="M40 78 L40 68 Q40 58 50 58 L96 58 Q104 58 108 68 L114 78"
+    d="M16 56 L16 42 Q16 30 28 30 L88 30 Q98 30 104 42 L112 56"
     fill="url(#folderGrad)"
   />
 
   <!-- フォルダ 本体 -->
-  <rect x="40" y="78" width="176" height="120" rx="8" ry="8" fill="url(#folderGrad)" />
+  <rect x="16" y="56" width="224" height="170" rx="12" ry="12" fill="url(#folderGrad)" />
 
   <!-- フォルダ 上部の光沢ライン -->
-  <rect x="40" y="78" width="176" height="5" rx="2.5" fill="white" opacity="0.15" />
+  <rect x="16" y="56" width="224" height="6" rx="3" fill="white" opacity="0.2" />
 
-  <!-- フォルダ 下部の影 -->
-  <rect x="40" y="190" width="176" height="8" rx="4" fill="black" opacity="0.15" />
+  <!-- フォルダ 下部の微妙な影 -->
+  <rect x="20" y="218" width="216" height="8" rx="4" fill="#0050A0" opacity="0.4" />
 
   <!-- 稲妻 - ソフトシャドウ -->
   <path
-    d="M118 72 L152 72 L130 120 L160 120 L108 204 L122 150 L96 150 Z"
-    fill="black"
-    opacity="0.2"
-    transform="translate(2, 2)"
+    d="M118 46 L158 46 L132 110 L166 110 L104 228 L120 156 L90 156 Z"
+    fill="#0050A0"
+    opacity="0.3"
+    transform="translate(3, 3)"
   />
 
   <!-- 稲妻 - メイン -->
   <path
-    d="M118 72 L152 72 L130 120 L160 120 L108 204 L122 150 L96 150 Z"
+    d="M118 46 L158 46 L132 110 L166 110 L104 228 L120 156 L90 156 Z"
     fill="white"
   />
 
   <defs>
-    <!-- 背景の微妙な深み -->
-    <radialGradient id="bgSubtle" cx="50%" cy="40%" r="60%">
-      <stop offset="0%" stop-color="#333333" />
-      <stop offset="100%" stop-color="#222222" />
-    </radialGradient>
-
-    <!-- フォルダ - 青 -->
+    <!-- フォルダ - 青グラデーション -->
     <linearGradient id="folderGrad" x1="0%" y1="0%" x2="0%" y2="100%">
-      <stop offset="0%" stop-color="#1E9BF0" />
-      <stop offset="100%" stop-color="#0072D0" />
+      <stop offset="0%" stop-color="#2BA4F5" />
+      <stop offset="100%" stop-color="#0074D4" />
     </linearGradient>
   </defs>
 </svg>

@@ -2,6 +2,7 @@ using System.Collections.ObjectModel;
 using System.Collections.Specialized;
 using System.Diagnostics;
 using System.IO;
+using System.Runtime.InteropServices;
 using System.Windows;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
@@ -154,9 +155,9 @@ public partial class FilePaneViewModel : ObservableObject
         {
             StatusMessage = "アクセスが拒否されました。";
         }
-        catch (DirectoryNotFoundException)
+        catch (DirectoryNotFoundException ex)
         {
-            StatusMessage = "ディレクトリが見つかりません。";
+            StatusMessage = $"ディレクトリが見つかりません: {path} ({ex.Message})";
         }
         catch (IOException ex)
         {
@@ -512,6 +513,11 @@ public partial class FilePaneViewModel : ObservableObject
     private static List<FileItem> LoadDirectory(string path)
     {
         var items = new List<FileItem>();
+
+        // UNC server path (\\server) — enumerate network shares via NetShareEnum
+        if (IsUncServerPath(path))
+            return EnumerateNetworkShares(path);
+
         var dirInfo = new DirectoryInfo(path);
 
         if (!dirInfo.Exists)
@@ -577,6 +583,88 @@ public partial class FilePaneViewModel : ObservableObject
         }
 
         return items;
+    }
+
+    // ==================== Network share enumeration ====================
+
+    [DllImport("netapi32.dll", CharSet = CharSet.Unicode)]
+    private static extern int NetShareEnum(
+        string serverName, int level, out IntPtr bufPtr, int prefMaxLen,
+        out int entriesRead, out int totalEntries, ref int resumeHandle);
+
+    [DllImport("netapi32.dll")]
+    private static extern int NetApiBufferFree(IntPtr buffer);
+
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    private struct SHARE_INFO_1
+    {
+        [MarshalAs(UnmanagedType.LPWStr)] public string shi1_netname;
+        public uint shi1_type;
+        [MarshalAs(UnmanagedType.LPWStr)] public string shi1_remark;
+    }
+
+    private const uint STYPE_DISKTREE = 0x00000000;
+    private const uint STYPE_SPECIAL = 0x80000000;
+
+    private static List<FileItem> EnumerateNetworkShares(string serverPath)
+    {
+        var items = new List<FileItem>();
+        var server = serverPath.TrimEnd('\\');
+        int resumeHandle = 0;
+
+        int result = NetShareEnum(server, 1, out var bufPtr, -1,
+            out int entriesRead, out _, ref resumeHandle);
+
+        if (result != 0 || bufPtr == IntPtr.Zero)
+            throw new DirectoryNotFoundException($"ネットワーク共有を列挙できません: {server} (エラーコード: {result})");
+
+        try
+        {
+            var structSize = Marshal.SizeOf<SHARE_INFO_1>();
+            var currentPtr = bufPtr;
+
+            for (int i = 0; i < entriesRead; i++)
+            {
+                var shareInfo = Marshal.PtrToStructure<SHARE_INFO_1>(currentPtr);
+                currentPtr = IntPtr.Add(currentPtr, structSize);
+
+                // Skip hidden shares (ending with $) and non-disk shares
+                if (shareInfo.shi1_netname.EndsWith('$')) continue;
+                if ((shareInfo.shi1_type & ~STYPE_SPECIAL) != STYPE_DISKTREE) continue;
+
+                var sharePath = $"{server}\\{shareInfo.shi1_netname}";
+                try
+                {
+                    var (icon, typeName) = IconHelper.GetIconAndType(sharePath, true);
+                    items.Add(new FileItem
+                    {
+                        Name = shareInfo.shi1_netname,
+                        FullPath = sharePath,
+                        LastModified = DateTime.MinValue,
+                        IsDirectory = true,
+                        Type = string.IsNullOrEmpty(shareInfo.shi1_remark) ? "ネットワーク共有" : shareInfo.shi1_remark,
+                        Icon = icon,
+                    });
+                }
+                catch { }
+            }
+        }
+        finally
+        {
+            NetApiBufferFree(bufPtr);
+        }
+
+        return items;
+    }
+
+    /// <summary>UNC server path (\\server) without share name</summary>
+    private static bool IsUncServerPath(string path)
+    {
+        if (!path.StartsWith(@"\\")) return false;
+        var trimmed = path.TrimEnd('\\');
+        // \\server has no additional backslash after the server name
+        var afterPrefix = trimmed[2..];
+        return !afterPrefix.Contains('\\');
     }
 
     private static string? GetUncParent(string uncPath)

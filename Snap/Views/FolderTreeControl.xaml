@@ -1,0 +1,34 @@
+<UserControl x:Class="Snap.Views.FolderTreeControl"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:models="clr-namespace:Snap.Models">
+
+    <Grid>
+        <!-- Folder Tree -->
+        <TreeView
+                  x:Name="FolderTree"
+                  ItemsSource="{Binding RootNodes}"
+                  Background="Transparent"
+                  BorderThickness="0"
+                  VirtualizingStackPanel.IsVirtualizing="True"
+                  VirtualizingStackPanel.VirtualizationMode="Recycling">
+            <TreeView.ItemContainerStyle>
+                <Style TargetType="TreeViewItem" BasedOn="{StaticResource {x:Type TreeViewItem}}">
+                    <EventSetter Event="Expanded" Handler="TreeViewItem_Expanded"/>
+                    <EventSetter Event="Selected" Handler="TreeViewItem_Selected"/>
+                </Style>
+            </TreeView.ItemContainerStyle>
+            <TreeView.ItemTemplate>
+                <HierarchicalDataTemplate DataType="{x:Type models:TreeNode}"
+                                           ItemsSource="{Binding Children}">
+                    <StackPanel Orientation="Horizontal" Margin="2,1">
+                        <Image Source="{Binding Icon}" Width="16" Height="16"
+                               VerticalAlignment="Center" Margin="0,0,4,0"
+                               RenderOptions.BitmapScalingMode="NearestNeighbor"/>
+                        <TextBlock Text="{Binding Name}" VerticalAlignment="Center"/>
+                    </StackPanel>
+                </HierarchicalDataTemplate>
+            </TreeView.ItemTemplate>
+        </TreeView>
+    </Grid>
+</UserControl>

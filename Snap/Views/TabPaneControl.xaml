@@ -1,0 +1,26 @@
+<UserControl x:Class="Snap.Views.TabPaneControl"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:vm="clr-namespace:Snap.ViewModels"
+             xmlns:views="clr-namespace:Snap.Views">
+
+    <Grid Background="Transparent" x:Name="RootGrid"
+          AllowDrop="True"
+          PreviewDragEnter="Grid_TabDragEnter"
+          PreviewDragOver="Grid_TabDragOver"
+          PreviewDrop="Grid_TabDrop">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+        </Grid.RowDefinitions>
+
+        <!-- Tab Header Bar -->
+        <Border Grid.Row="0" Background="Transparent">
+            <WrapPanel x:Name="TabHeaderPanel" Orientation="Horizontal"/>
+        </Border>
+
+        <!-- Active Tab Content -->
+        <views:FilePaneControl Grid.Row="1"
+                               DataContext="{Binding SelectedTab}"/>
+    </Grid>
+</UserControl>

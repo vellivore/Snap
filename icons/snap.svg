@@ -1,0 +1,42 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256">
+  <defs>
+    <!-- Subtle gradient for folder -->
+    <linearGradient id="folderGrad" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#1A8FE8"/>
+      <stop offset="100%" stop-color="#0068C4"/>
+    </linearGradient>
+    <!-- Background gradient -->
+    <linearGradient id="bgGrad" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#252525"/>
+      <stop offset="100%" stop-color="#1A1A1A"/>
+    </linearGradient>
+    <!-- Lightning glow -->
+    <filter id="glow">
+      <feGaussianBlur stdDeviation="2" result="blur"/>
+      <feMerge>
+        <feMergeNode in="blur"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+  </defs>
+
+  <!-- Background rounded rect -->
+  <rect x="16" y="16" width="224" height="224" rx="40" ry="40" fill="url(#bgGrad)"/>
+
+  <!-- Folder tab -->
+  <rect x="42" y="68" width="68" height="32" rx="8" ry="8" fill="url(#folderGrad)"/>
+
+  <!-- Folder body -->
+  <rect x="42" y="82" width="172" height="112" rx="10" ry="10" fill="url(#folderGrad)"/>
+
+  <!-- Folder body inner highlight (subtle) -->
+  <rect x="42" y="82" width="172" height="6" rx="3" ry="3" fill="rgba(255,255,255,0.12)"/>
+
+  <!-- Lightning bolt - clean, bold -->
+  <path d="M 118 72 L 152 72 L 128 122 L 160 122 L 108 200 L 122 142 L 96 142 Z"
+        fill="white" filter="url(#glow)"/>
+
+  <!-- Lightning bolt sharp overlay (no blur) -->
+  <path d="M 118 72 L 152 72 L 128 122 L 160 122 L 108 200 L 122 142 L 96 142 Z"
+        fill="white"/>
+</svg>

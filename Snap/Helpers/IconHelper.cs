@@ -56,6 +56,20 @@ public static class IconHelper
 
     public static (ImageSource? icon, string typeName) GetIconAndType(string path, bool isDirectory)
     {
+        // Network paths: use generic icons (fast, no network access)
+        if (path.StartsWith(@"\\"))
+        {
+            if (isDirectory)
+            {
+                return _fileIconCache.GetOrAdd("\\dir", _ =>
+                    GetIconFromShell("folder", FILE_ATTRIBUTE_DIRECTORY, useFileAttributes: true));
+            }
+            var netExt = Path.GetExtension(path).ToLowerInvariant();
+            if (string.IsNullOrEmpty(netExt)) netExt = ".";
+            return _fileIconCache.GetOrAdd(netExt, _ =>
+                GetIconFromShell("dummy" + netExt, FILE_ATTRIBUTE_NORMAL, useFileAttributes: true));
+        }
+
         if (isDirectory)
         {
             return GetFolderIcon(path);

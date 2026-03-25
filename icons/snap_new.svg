@@ -1,0 +1,54 @@
+<svg
+  width="256"
+  height="256"
+  viewBox="0 0 256 256"
+  fill="none"
+  xmlns="http://www.w3.org/2000/svg"
+>
+  <!-- 背景角丸 - ダークグレー -->
+  <rect x="16" y="16" width="224" height="224" rx="40" ry="40" fill="#2a2a2a" />
+  <rect x="16" y="16" width="224" height="224" rx="40" ry="40" fill="url(#bgSubtle)" />
+
+  <!-- フォルダ タブ -->
+  <path
+    d="M54 82 L54 72 Q54 64 62 64 L104 64 Q110 64 114 72 L118 82"
+    fill="url(#folderGrad)"
+  />
+
+  <!-- フォルダ 本体 -->
+  <rect x="54" y="82" width="148" height="106" rx="8" ry="8" fill="url(#folderGrad)" />
+
+  <!-- フォルダ 上部の光沢ライン -->
+  <rect x="54" y="82" width="148" height="5" rx="2.5" fill="white" opacity="0.15" />
+
+  <!-- フォルダ 下部の影 -->
+  <rect x="54" y="180" width="148" height="8" rx="4" fill="black" opacity="0.15" />
+
+  <!-- 稲妻 - ソフトシャドウ -->
+  <path
+    d="M120 78 L150 78 L130 122 L156 122 L110 196 L122 146 L100 146 Z"
+    fill="black"
+    opacity="0.2"
+    transform="translate(2, 2)"
+  />
+
+  <!-- 稲妻 - メイン -->
+  <path
+    d="M120 78 L150 78 L130 122 L156 122 L110 196 L122 146 L100 146 Z"
+    fill="white"
+  />
+
+  <defs>
+    <!-- 背景の微妙な深み -->
+    <radialGradient id="bgSubtle" cx="50%" cy="40%" r="60%">
+      <stop offset="0%" stop-color="#333333" />
+      <stop offset="100%" stop-color="#222222" />
+    </radialGradient>
+
+    <!-- フォルダ - 青 -->
+    <linearGradient id="folderGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#1E9BF0" />
+      <stop offset="100%" stop-color="#0072D0" />
+    </linearGradient>
+  </defs>
+</svg>

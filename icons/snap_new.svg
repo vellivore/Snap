@@ -5,28 +5,28 @@
   fill="none"
   xmlns="http://www.w3.org/2000/svg"
 >
-  <!-- 背景角丸 - ダークグレー -->
-  <rect x="16" y="16" width="224" height="224" rx="40" ry="40" fill="#2a2a2a" />
-  <rect x="16" y="16" width="224" height="224" rx="40" ry="40" fill="url(#bgSubtle)" />
+  <!-- 背景角丸 - ダークグレー（パディング最小化） -->
+  <rect x="4" y="4" width="248" height="248" rx="40" ry="40" fill="#2a2a2a" />
+  <rect x="4" y="4" width="248" height="248" rx="40" ry="40" fill="url(#bgSubtle)" />
 
   <!-- フォルダ タブ -->
   <path
-    d="M54 82 L54 72 Q54 64 62 64 L104 64 Q110 64 114 72 L118 82"
+    d="M40 78 L40 68 Q40 58 50 58 L96 58 Q104 58 108 68 L114 78"
     fill="url(#folderGrad)"
   />
 
   <!-- フォルダ 本体 -->
-  <rect x="54" y="82" width="148" height="106" rx="8" ry="8" fill="url(#folderGrad)" />
+  <rect x="40" y="78" width="176" height="120" rx="8" ry="8" fill="url(#folderGrad)" />
 
   <!-- フォルダ 上部の光沢ライン -->
-  <rect x="54" y="82" width="148" height="5" rx="2.5" fill="white" opacity="0.15" />
+  <rect x="40" y="78" width="176" height="5" rx="2.5" fill="white" opacity="0.15" />
 
   <!-- フォルダ 下部の影 -->
-  <rect x="54" y="180" width="148" height="8" rx="4" fill="black" opacity="0.15" />
+  <rect x="40" y="190" width="176" height="8" rx="4" fill="black" opacity="0.15" />
 
   <!-- 稲妻 - ソフトシャドウ -->
   <path
-    d="M120 78 L150 78 L130 122 L156 122 L110 196 L122 146 L100 146 Z"
+    d="M118 72 L152 72 L130 120 L160 120 L108 204 L122 150 L96 150 Z"
     fill="black"
     opacity="0.2"
     transform="translate(2, 2)"
@@ -34,7 +34,7 @@
 
   <!-- 稲妻 - メイン -->
   <path
-    d="M120 78 L150 78 L130 122 L156 122 L110 196 L122 146 L100 146 Z"
+    d="M118 72 L152 72 L130 120 L160 120 L108 204 L122 150 L96 150 Z"
     fill="white"
   />
 

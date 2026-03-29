@@ -30,7 +30,7 @@
                 Visibility="Collapsed"
                 HorizontalAlignment="Left"
                 Margin="40,0,0,0"
-                Width="220"
+                MinWidth="180"
                 Background="#F0202028"
                 BorderBrush="#500078D4"
                 BorderThickness="1"
@@ -85,7 +85,9 @@
                                                 PreviewMouseMove="Item_PreviewMouseMove"
                                                 Tag="Pinned">
                                             <Border.ContextMenu>
-                                                <ContextMenu>
+                                                <ContextMenu Opened="PinnedContextMenu_Opened"
+                                                             Closed="PinnedContextMenu_Closed">
+                                                    <MenuItem Header="名前の変更" Click="PinnedRename_Click"/>
                                                     <MenuItem Header="削除" Click="PinnedDelete_Click"/>
                                                 </ContextMenu>
                                             </Border.ContextMenu>

@@ -26,6 +26,9 @@ public partial class FilePaneViewModel : ObservableObject
     [ObservableProperty]
     private string _tabHeader = "新しいタブ";
 
+    /// <summary>True when user has set a custom tab name (not auto-generated from path).</summary>
+    public bool HasCustomTabHeader { get; set; }
+
     [ObservableProperty]
     private FileItem? _selectedItem;
 
@@ -34,6 +37,13 @@ public partial class FilePaneViewModel : ObservableObject
 
     // All items before filtering
     private List<FileItem> _allItems = new();
+
+    // Sorting state
+    private string _sortColumn = "Name";
+    private bool _sortAscending = true;
+
+    public string SortColumn => _sortColumn;
+    public bool SortAscending => _sortAscending;
 
     // Navigation history
     private readonly List<string> _history = new();
@@ -71,6 +81,9 @@ public partial class FilePaneViewModel : ObservableObject
         await NavigateToAsync(CurrentPath);
     }
 
+    /// <summary>Special path representing the "PC" (drive list) view.</summary>
+    public const string PcViewPath = "::PC";
+
     [RelayCommand]
     public async Task NavigateToAsync(string path)
     {
@@ -79,18 +92,29 @@ public partial class FilePaneViewModel : ObservableObject
 
         path = path.Trim();
 
-        // Normalize path
-        if (!path.StartsWith(@"\\"))
+        // "PC" view — drive list
+        bool isPcView = string.Equals(path, PcViewPath, StringComparison.OrdinalIgnoreCase)
+                        || string.Equals(path, "PC", StringComparison.OrdinalIgnoreCase);
+
+        if (!isPcView)
         {
-            try
+            // Normalize path
+            if (!path.StartsWith(@"\\"))
             {
-                path = Path.GetFullPath(path);
+                try
+                {
+                    path = Path.GetFullPath(path);
+                }
+                catch (Exception ex)
+                {
+                    StatusMessage = $"パスが無効です: {ex.Message}";
+                    return;
+                }
             }
-            catch (Exception ex)
-            {
-                StatusMessage = $"パスが無効です: {ex.Message}";
-                return;
-            }
+        }
+        else
+        {
+            path = PcViewPath;
         }
 
         IsLoading = true;
@@ -99,7 +123,7 @@ public partial class FilePaneViewModel : ObservableObject
         try
         {
             var tracker = _usageTracker;
-            var items = await Task.Run(() => LoadDirectory(path));
+            var items = await Task.Run(() => isPcView ? LoadDrives() : LoadDirectory(path));
 
             // Set frequency levels
             if (tracker != null)
@@ -113,13 +137,14 @@ public partial class FilePaneViewModel : ObservableObject
             Application.Current.Dispatcher.Invoke(() =>
             {
                 _allItems = items;
-                Items.Clear();
-                foreach (var item in items)
-                {
-                    Items.Add(item);
-                }
+                ApplySortToItems();
                 CurrentPath = path;
-                TabHeader = Path.GetFileName(path.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar))
+                // Reset custom tab name when navigating to a different directory
+                if (HasCustomTabHeader)
+                    HasCustomTabHeader = false;
+
+                TabHeader = isPcView ? "PC"
+                    : Path.GetFileName(path.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar))
                             is { Length: > 0 } name ? name : path;
                 StatusMessage = $"{Items.Count} 項目";
             });
@@ -510,6 +535,47 @@ public partial class FilePaneViewModel : ObservableObject
         }
     }
 
+    private static List<FileItem> LoadDrives()
+    {
+        var items = new List<FileItem>();
+        foreach (var drive in DriveInfo.GetDrives())
+        {
+            try
+            {
+                var label = drive.IsReady && !string.IsNullOrEmpty(drive.VolumeLabel)
+                    ? $"{drive.VolumeLabel} ({drive.Name.TrimEnd('\\')})"
+                    : $"{drive.Name.TrimEnd('\\')}";
+                var driveType = drive.DriveType switch
+                {
+                    DriveType.Fixed => "ローカル ディスク",
+                    DriveType.Removable => "リムーバブル ディスク",
+                    DriveType.Network => "ネットワーク ドライブ",
+                    DriveType.CDRom => "CD/DVD ドライブ",
+                    DriveType.Ram => "RAM ディスク",
+                    _ => "ドライブ",
+                };
+                var size = drive.IsReady ? drive.TotalSize : 0;
+                var (icon, _) = Helpers.IconHelper.GetIconAndType(drive.Name, true);
+
+                items.Add(new FileItem
+                {
+                    Name = label,
+                    FullPath = drive.Name,
+                    LastModified = DateTime.MinValue,
+                    Size = size,
+                    IsDirectory = true,
+                    Type = driveType,
+                    Icon = icon,
+                });
+            }
+            catch
+            {
+                // Skip inaccessible drives
+            }
+        }
+        return items;
+    }
+
     private static List<FileItem> LoadDirectory(string path)
     {
         var items = new List<FileItem>();
@@ -715,6 +781,59 @@ public partial class FilePaneViewModel : ObservableObject
             var destSubDir = Path.Combine(destDir, Path.GetFileName(subDir));
             CopyDirectoryRecursive(subDir, destSubDir);
         }
+    }
+
+    public void SortByColumn(string column)
+    {
+        if (_sortColumn == column)
+        {
+            _sortAscending = !_sortAscending;
+        }
+        else
+        {
+            _sortColumn = column;
+            _sortAscending = true;
+        }
+
+        OnPropertyChanged(nameof(SortColumn));
+        OnPropertyChanged(nameof(SortAscending));
+
+        ApplySortToItems();
+    }
+
+    private void ApplySortToItems()
+    {
+        var dirs = _allItems.Where(i => i.IsDirectory);
+        var files = _allItems.Where(i => !i.IsDirectory);
+
+        dirs = ApplySortOrder(dirs);
+        files = ApplySortOrder(files);
+
+        var sorted = dirs.Concat(files).ToList();
+
+        Items.Clear();
+        foreach (var item in sorted)
+            Items.Add(item);
+    }
+
+    private IEnumerable<FileItem> ApplySortOrder(IEnumerable<FileItem> items)
+    {
+        return _sortColumn switch
+        {
+            "Name" => _sortAscending
+                ? items.OrderBy(i => i.Name, StringComparer.OrdinalIgnoreCase)
+                : items.OrderByDescending(i => i.Name, StringComparer.OrdinalIgnoreCase),
+            "LastModified" => _sortAscending
+                ? items.OrderBy(i => i.LastModified)
+                : items.OrderByDescending(i => i.LastModified),
+            "Size" => _sortAscending
+                ? items.OrderBy(i => i.Size)
+                : items.OrderByDescending(i => i.Size),
+            "Type" => _sortAscending
+                ? items.OrderBy(i => i.Type, StringComparer.OrdinalIgnoreCase)
+                : items.OrderByDescending(i => i.Type, StringComparer.OrdinalIgnoreCase),
+            _ => items
+        };
     }
 
     public async Task OnItemDoubleClicked(FileItem item)

@@ -63,7 +63,7 @@
                 <views:SidebarControl Grid.Column="0" Grid.ColumnSpan="2"
                                        DataContext="{Binding Sidebar}"
                                        Panel.ZIndex="500"
-                                       HorizontalAlignment="Left"/>
+                                       HorizontalAlignment="Stretch"/>
 
                 <!-- Folder Tree -->
                 <views:FolderTreeControl Grid.Column="1"

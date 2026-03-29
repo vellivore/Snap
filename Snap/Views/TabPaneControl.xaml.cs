@@ -152,13 +152,14 @@ public partial class TabPaneControl : UserControl
             BorderThickness = new Thickness(1, 1, 1, 0),
             CornerRadius = new CornerRadius(4, 4, 0, 0),
             Margin = new Thickness(2, 1, 0, 0),
-            Padding = new Thickness(4, 1, 4, 1),
+            Padding = new Thickness(4, 2, 4, 2),
             Cursor = Cursors.Hand,
             Tag = tab,
             Child = stack,
             AllowDrop = true
         };
         border.MouseLeftButtonDown += TabHeader_MouseLeftButtonDown;
+        border.MouseRightButtonUp += TabHeader_MouseRightButtonUp;
         border.MouseMove += TabHeader_MouseMove;
         border.DragEnter += TabHeader_DragEnter;
         border.DragOver += TabHeader_DragOver;
@@ -274,6 +275,65 @@ public partial class TabPaneControl : UserControl
 
         vm.Tabs.Move(sourceIndex, targetIndex);
         e.Handled = true;
+    }
+
+    private void TabHeader_MouseRightButtonUp(object sender, MouseButtonEventArgs e)
+    {
+        if (sender is not Border border || border.Tag is not FilePaneViewModel tab) return;
+        e.Handled = true;
+
+        var menu = new ContextMenu
+        {
+            Background = new SolidColorBrush(Color.FromRgb(0x2D, 0x2D, 0x30)),
+            Foreground = new SolidColorBrush(Color.FromRgb(0xE0, 0xE0, 0xE0)),
+            BorderBrush = new SolidColorBrush(Color.FromRgb(0x3F, 0x3F, 0x46)),
+        };
+
+        var renameItem = new MenuItem
+        {
+            Header = "タブ名の変更",
+            Foreground = new SolidColorBrush(Color.FromRgb(0xE0, 0xE0, 0xE0)),
+        };
+        renameItem.Click += (_, _) =>
+        {
+            var dialog = new RenameDialog(tab.TabHeader)
+            {
+                Owner = Window.GetWindow(this)
+            };
+            if (dialog.ShowDialog() == true && !string.IsNullOrWhiteSpace(dialog.NewName))
+            {
+                tab.TabHeader = dialog.NewName;
+                tab.HasCustomTabHeader = true;
+            }
+        };
+        menu.Items.Add(renameItem);
+
+        var resetItem = new MenuItem
+        {
+            Header = "タブ名を戻す",
+            Foreground = new SolidColorBrush(Color.FromRgb(0xE0, 0xE0, 0xE0)),
+            IsEnabled = tab.HasCustomTabHeader,
+        };
+        resetItem.Click += (_, _) =>
+        {
+            tab.HasCustomTabHeader = false;
+            // Regenerate name from current path
+            var path = tab.CurrentPath;
+            if (path == FilePaneViewModel.PcViewPath)
+            {
+                tab.TabHeader = "PC";
+            }
+            else
+            {
+                tab.TabHeader = System.IO.Path.GetFileName(
+                    path.TrimEnd(System.IO.Path.DirectorySeparatorChar, System.IO.Path.AltDirectorySeparatorChar))
+                    is { Length: > 0 } name ? name : path;
+            }
+        };
+        menu.Items.Add(resetItem);
+
+        menu.PlacementTarget = border;
+        menu.IsOpen = true;
     }
 
     private void CloseTab_Click(object sender, RoutedEventArgs e)

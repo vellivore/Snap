@@ -5,6 +5,7 @@ using System.Windows.Interop;
 
 namespace Snap.Interop;
 
+
 internal record SnapMenuItem(string Label, Action Handler);
 
 internal static class ShellContextMenu
@@ -13,7 +14,8 @@ internal static class ShellContextMenu
     /// Shows native shell context menu for one or more files/folders.
     /// </summary>
     public static void ShowContextMenu(IntPtr hwnd, string[] paths, int x, int y,
-        Action? onRefresh = null, List<SnapMenuItem>? customItems = null)
+        Action? onRefresh = null, List<SnapMenuItem>? customItems = null,
+        Action? onMenuReady = null)
     {
         if (paths.Length == 0) return;
 
@@ -73,6 +75,9 @@ internal static class ShellContextMenu
 
             // Add Snap custom items
             var snapCmdIds = AppendSnapItems(hMenu, customItems);
+
+            // Notify caller that menu is ready (e.g. to restore cursor)
+            onMenuReady?.Invoke();
 
             // Hook WndProc for IContextMenu2/3 and to suppress OLE drag-drop during menu
             var cm2 = contextMenu as IContextMenu2;
@@ -159,7 +164,8 @@ internal static class ShellContextMenu
     /// Shows native shell background context menu for a folder (right-click on empty space).
     /// </summary>
     public static void ShowBackgroundMenu(IntPtr hwnd, string folderPath, int x, int y,
-        Action? onRefresh = null, List<SnapMenuItem>? customItems = null)
+        Action? onRefresh = null, List<SnapMenuItem>? customItems = null,
+        Action? onMenuReady = null)
     {
         IShellFolder? shellFolder = null;
         IntPtr hMenu = IntPtr.Zero;
@@ -189,6 +195,9 @@ internal static class ShellContextMenu
                 ShellNativeMethods.CMF_EXPLORE);
 
             var snapCmdIds = AppendSnapItems(hMenu, customItems);
+
+            // Notify caller that menu is ready
+            onMenuReady?.Invoke();
 
             // Hook WndProc for IContextMenu2/3 and to suppress OLE drag-drop during menu
             var cm2 = contextMenu as IContextMenu2;

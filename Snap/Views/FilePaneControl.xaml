@@ -121,7 +121,7 @@
             <!-- Context menu is handled natively via Shell IContextMenu (see code-behind) -->
             <ListView.View>
                 <GridView ColumnHeaderContainerStyle="{StaticResource DarkColumnHeader}">
-                    <GridViewColumn Header="名前" Width="280">
+                    <GridViewColumn Header="名前 ^" Width="280">
                         <GridViewColumn.CellTemplate>
                             <DataTemplate>
                                 <StackPanel Orientation="Horizontal">

@@ -48,7 +48,9 @@ public partial class FolderTreeViewModel : ObservableObject
                 roots.Add(node);
             }
 
-            // ドライブ一覧
+            // PC ノード（ドライブ一覧を子に持つ）
+            var pcNode = new TreeNode { Name = "PC", FullPath = FilePaneViewModel.PcViewPath };
+            pcNode.RemoveDummyChild(); // ダミー子を除去、直接ドライブを追加
             foreach (var drive in DriveInfo.GetDrives())
             {
                 try
@@ -56,14 +58,15 @@ public partial class FolderTreeViewModel : ObservableObject
                     var label = drive.IsReady
                         ? $"{drive.VolumeLabel} ({drive.Name.TrimEnd('\\')})"
                         : drive.Name.TrimEnd('\\');
-                    var node = CreateNode(label, drive.Name);
-                    roots.Add(node);
+                    var driveNode = CreateNode(label, drive.Name);
+                    pcNode.Children.Add(driveNode);
                 }
                 catch
                 {
                     // ドライブ情報取得失敗は無視
                 }
             }
+            roots.Add(pcNode);
 
             return roots;
         }).ContinueWith(t =>
@@ -72,7 +75,19 @@ public partial class FolderTreeViewModel : ObservableObject
             {
                 foreach (var node in t.Result)
                 {
-                    node.Icon = IconHelper.GetIconAndType(node.FullPath, true).icon;
+                    if (node.FullPath == FilePaneViewModel.PcViewPath)
+                    {
+                        // PC ノード自体にはアイコンなし、子ノード（ドライブ）にアイコンを設定
+                        foreach (var child in node.Children)
+                        {
+                            child.Icon = IconHelper.GetIconAndType(child.FullPath, true).icon;
+                        }
+                        node.IsExpanded = true;
+                    }
+                    else
+                    {
+                        node.Icon = IconHelper.GetIconAndType(node.FullPath, true).icon;
+                    }
                     RootNodes.Add(node);
                 }
             }
@@ -182,6 +197,19 @@ public partial class FolderTreeViewModel : ObservableObject
         IsSyncing = true;
         try
         {
+            // PC ビューの場合は PC ノードを選択
+            if (path == FilePaneViewModel.PcViewPath)
+            {
+                DeselectAll(RootNodes);
+                var pcNode = RootNodes.FirstOrDefault(n => n.FullPath == FilePaneViewModel.PcViewPath);
+                if (pcNode != null)
+                {
+                    pcNode.IsExpanded = true;
+                    pcNode.IsSelected = true;
+                }
+                return;
+            }
+
             // UNC パスの場合はサーバーノードを動的追加
             if (path.StartsWith(@"\\"))
             {
@@ -192,15 +220,35 @@ public partial class FolderTreeViewModel : ObservableObject
             // パスをルートから分解
             var fullPath = Path.GetFullPath(path);
 
-            // ルートノードを探す
+            // ルートノードを探す（クイックアクセスノードを優先、次に PC 配下のドライブ）
             TreeNode? current = null;
             foreach (var root in RootNodes)
             {
+                if (root.FullPath == FilePaneViewModel.PcViewPath) continue; // PC ノード自体はスキップ
                 var rootPath = Path.GetFullPath(root.FullPath).TrimEnd(Path.DirectorySeparatorChar);
                 if (fullPath.StartsWith(rootPath, StringComparison.OrdinalIgnoreCase))
                 {
                     current = root;
                     break;
+                }
+            }
+
+            // クイックアクセスで見つからなければ PC ノード配下のドライブを探す
+            if (current == null)
+            {
+                var pcNode = RootNodes.FirstOrDefault(n => n.FullPath == FilePaneViewModel.PcViewPath);
+                if (pcNode != null)
+                {
+                    foreach (var driveNode in pcNode.Children)
+                    {
+                        var drivePath = Path.GetFullPath(driveNode.FullPath).TrimEnd(Path.DirectorySeparatorChar);
+                        if (fullPath.StartsWith(drivePath, StringComparison.OrdinalIgnoreCase))
+                        {
+                            pcNode.IsExpanded = true;
+                            current = driveNode;
+                            break;
+                        }
+                    }
                 }
             }
 

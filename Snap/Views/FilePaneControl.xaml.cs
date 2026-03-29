@@ -2,6 +2,7 @@ using System.ComponentModel;
 using System.IO;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Controls.Primitives;
 using System.Windows.Input;
 using System.Windows.Interop;
 using System.Windows.Media;
@@ -35,14 +36,72 @@ public partial class FilePaneControl : UserControl
         remove => RemoveHandler(AddBookmarkRequestedEvent, value);
     }
 
+    // Column header display name → sort property mapping
+    private static readonly Dictionary<string, string> ColumnMap = new()
+    {
+        { "名前", "Name" },
+        { "更新日時", "LastModified" },
+        { "サイズ", "Size" },
+        { "種類", "Type" },
+    };
+
+    // Reverse mapping for indicator updates
+    private static readonly Dictionary<string, string> ColumnDisplayNames = new()
+    {
+        { "Name", "名前" },
+        { "LastModified", "更新日時" },
+        { "Size", "サイズ" },
+        { "Type", "種類" },
+    };
+
     public FilePaneControl()
     {
         InitializeComponent();
         MouseDown += FilePaneControl_MouseDown;
         DataContextChanged += OnDataContextChanged;
+        AddHandler(GridViewColumnHeader.ClickEvent, new RoutedEventHandler(ColumnHeader_Click));
     }
 
     private FilePaneViewModel? ViewModel => DataContext as FilePaneViewModel;
+
+    private void ColumnHeader_Click(object sender, RoutedEventArgs e)
+    {
+        if (e.OriginalSource is not GridViewColumnHeader header) return;
+        if (header.Role == GridViewColumnHeaderRole.Padding) return;
+        if (header.Column == null) return;
+
+        // Strip existing sort indicator from header text
+        var headerText = (header.Column.Header?.ToString() ?? "").TrimEnd(' ', '^', 'v');
+
+        if (!ColumnMap.TryGetValue(headerText, out var sortProperty)) return;
+
+        ViewModel?.SortByColumn(sortProperty);
+        UpdateSortIndicators();
+    }
+
+    private void UpdateSortIndicators()
+    {
+        var vm = ViewModel;
+        if (vm == null) return;
+
+        var gridView = FileListView.View as GridView;
+        if (gridView == null) return;
+
+        foreach (var col in gridView.Columns)
+        {
+            var text = (col.Header?.ToString() ?? "").TrimEnd(' ', '^', 'v');
+            if (!ColumnMap.TryGetValue(text, out var prop)) continue;
+
+            if (prop == vm.SortColumn)
+            {
+                col.Header = $"{text} {(vm.SortAscending ? "^" : "v")}";
+            }
+            else
+            {
+                col.Header = text;
+            }
+        }
+    }
 
     private void OnDataContextChanged(object sender, DependencyPropertyChangedEventArgs e)
     {
@@ -70,10 +129,20 @@ public partial class FilePaneControl : UserControl
 
         if (string.IsNullOrEmpty(path)) return;
 
+        // PC view — just show "PC"
+        if (path == FilePaneViewModel.PcViewPath)
+        {
+            AddBreadcrumbButton("PC", FilePaneViewModel.PcViewPath, null);
+            return;
+        }
+
         try
         {
             var fullPath = Path.GetFullPath(path);
             var parts = new List<(string name, string fullPath)>();
+
+            // Always start with PC
+            parts.Add(("PC", FilePaneViewModel.PcViewPath));
 
             // UNC path
             if (fullPath.StartsWith(@"\\"))
@@ -125,7 +194,11 @@ public partial class FilePaneControl : UserControl
 
                 // アイコン + テキストの StackPanel
                 var btnContent = new StackPanel { Orientation = Orientation.Horizontal };
-                var (segIcon, _) = IconHelper.GetIconAndType(parts[i].fullPath, true);
+                ImageSource? segIcon = null;
+                if (parts[i].fullPath != FilePaneViewModel.PcViewPath)
+                {
+                    try { (segIcon, _) = IconHelper.GetIconAndType(parts[i].fullPath, true); } catch { }
+                }
                 if (segIcon != null)
                 {
                     btnContent.Children.Add(new Image
@@ -183,6 +256,41 @@ public partial class FilePaneControl : UserControl
             };
             BreadcrumbBar.Items.Add(text);
         }
+    }
+
+    private void AddBreadcrumbButton(string text, string navPath, ImageSource? icon)
+    {
+        var btnContent = new StackPanel { Orientation = Orientation.Horizontal };
+        if (icon != null)
+        {
+            btnContent.Children.Add(new Image
+            {
+                Source = icon, Width = 14, Height = 14,
+                VerticalAlignment = VerticalAlignment.Center,
+                Margin = new Thickness(0, 0, 3, 0)
+            });
+        }
+        btnContent.Children.Add(new TextBlock
+        {
+            Text = text, VerticalAlignment = VerticalAlignment.Center
+        });
+
+        var btn = new Button
+        {
+            Content = btnContent,
+            Tag = navPath,
+            Background = Brushes.Transparent,
+            Foreground = new SolidColorBrush(Color.FromRgb(0xD0, 0xD0, 0xD4)),
+            BorderThickness = new Thickness(0),
+            Padding = new Thickness(4, 1, 4, 1),
+            Cursor = Cursors.Hand,
+            FontSize = 11,
+            VerticalAlignment = VerticalAlignment.Center
+        };
+        btn.Click += BreadcrumbSegment_Click;
+        btn.MouseEnter += (s, _) => { if (s is Button b) b.Foreground = new SolidColorBrush(Color.FromRgb(0x0, 0x78, 0xD4)); };
+        btn.MouseLeave += (s, _) => { if (s is Button b) b.Foreground = new SolidColorBrush(Color.FromRgb(0xD0, 0xD0, 0xD4)); };
+        BreadcrumbBar.Items.Add(btn);
     }
 
     private async void BreadcrumbSegment_Click(object sender, RoutedEventArgs e)
@@ -265,10 +373,22 @@ public partial class FilePaneControl : UserControl
         }
         else if (ViewModel is { } vm)
         {
-            var parent = Directory.GetParent(vm.CurrentPath);
-            if (parent != null)
+            if (vm.CurrentPath == FilePaneViewModel.PcViewPath)
             {
-                await vm.NavigateToAsync(parent.FullName);
+                // Already at PC view, do nothing
+            }
+            else
+            {
+                var parent = Directory.GetParent(vm.CurrentPath);
+                if (parent != null)
+                {
+                    await vm.NavigateToAsync(parent.FullName);
+                }
+                else
+                {
+                    // At drive root (e.g. C:\) — go up to PC view
+                    await vm.NavigateToAsync(FilePaneViewModel.PcViewPath);
+                }
             }
         }
     }
@@ -404,6 +524,9 @@ public partial class FilePaneControl : UserControl
                 }));
             }
 
+            // Show wait cursor while shell extensions load
+            Mouse.OverrideCursor = Cursors.Wait;
+
             // Disable AllowDrop on all panes to prevent drag-drop during menu pump
             var allPanes = GetAllFilePanes();
             foreach (var pane in allPanes) pane.SetAllowDrop(false);
@@ -412,10 +535,12 @@ public partial class FilePaneControl : UserControl
             {
                 ShellContextMenu.ShowContextMenu(hwnd, paths, x, y,
                     onRefresh: () => Dispatcher.BeginInvoke(async () => { if (vm != null) await vm.Refresh(); }),
-                    customItems: customItems);
+                    customItems: customItems,
+                    onMenuReady: () => Mouse.OverrideCursor = null);
             }
             finally
             {
+                Mouse.OverrideCursor = null;
                 Dispatcher.BeginInvoke(System.Windows.Threading.DispatcherPriority.ApplicationIdle, () =>
                 {
                     _shellMenuOpen = false;
@@ -439,6 +564,9 @@ public partial class FilePaneControl : UserControl
                 new("更新", () => Dispatcher.BeginInvoke(async () => { if (vm != null) await vm.Refresh(); })),
             };
 
+            // Show wait cursor while shell extensions load
+            Mouse.OverrideCursor = Cursors.Wait;
+
             var allPanes2 = GetAllFilePanes();
             foreach (var pane in allPanes2) pane.SetAllowDrop(false);
             _shellMenuOpen = true;
@@ -446,10 +574,12 @@ public partial class FilePaneControl : UserControl
             {
                 ShellContextMenu.ShowBackgroundMenu(hwnd, folderPath, x, y,
                     onRefresh: () => Dispatcher.BeginInvoke(async () => { if (vm != null) await vm.Refresh(); }),
-                    customItems: customItems);
+                    customItems: customItems,
+                    onMenuReady: () => Mouse.OverrideCursor = null);
             }
             finally
             {
+                Mouse.OverrideCursor = null;
                 Dispatcher.BeginInvoke(System.Windows.Threading.DispatcherPriority.ApplicationIdle, () =>
                 {
                     _shellMenuOpen = false;
@@ -500,12 +630,14 @@ public partial class FilePaneControl : UserControl
 
     private void FileList_PreviewMouseLeftButtonDown(object sender, MouseButtonEventArgs e)
     {
+        if (_shellMenuOpen) return;
         _fileDragStartPoint = e.GetPosition(FileListView);
         _fileDragInProgress = false;
     }
 
     private void FileList_PreviewMouseMove(object sender, MouseEventArgs e)
     {
+        if (_shellMenuOpen) return;
         if (e.LeftButton != MouseButtonState.Pressed || _fileDragInProgress)
             return;
 

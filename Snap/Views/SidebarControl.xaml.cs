@@ -22,6 +22,9 @@ public partial class SidebarControl : UserControl
     private BookmarkItem? _dragItem;
     private const double DragThreshold = 5.0;
 
+    // Context menu state — prevent float panel from closing while menu is open
+    private bool _contextMenuOpen;
+
     private static readonly SolidColorBrush HighlightBrush = new(Color.FromArgb(0x20, 0x00, 0x78, 0xD4));
 
     public SidebarControl()
@@ -33,6 +36,16 @@ public partial class SidebarControl : UserControl
 
         _closeTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(200) };
         _closeTimer.Tick += (s, e) => { _closeTimer.Stop(); HideFloat(); };
+
+        SizeChanged += (s, e) => UpdateFloatPanelWidth();
+    }
+
+    private void UpdateFloatPanelWidth()
+    {
+        // SidebarControl spans IconStrip(40) + TreeColumn, so float width = total - 40
+        var floatWidth = ActualWidth - 40;
+        if (floatWidth >= 180)
+            FloatPanel.Width = floatWidth;
     }
 
     private SidebarViewModel? ViewModel => DataContext as SidebarViewModel;
@@ -67,6 +80,7 @@ public partial class SidebarControl : UserControl
     private void IconStrip_MouseLeave(object sender, MouseEventArgs e)
     {
         if (_dragInProgress) return;
+        if (_contextMenuOpen) return;
         _openTimer.Stop();
         if (FloatPanel.Visibility == Visibility.Visible)
             _closeTimer.Start();
@@ -80,6 +94,7 @@ public partial class SidebarControl : UserControl
     private void FloatPanel_MouseLeave(object sender, MouseEventArgs e)
     {
         if (_dragInProgress) return;
+        if (_contextMenuOpen) return;
         _openTimer.Stop();
         _closeTimer.Start();
     }
@@ -115,6 +130,35 @@ public partial class SidebarControl : UserControl
         {
             ViewModel?.OnNavigate(item.FullPath);
             HideFloat();
+        }
+    }
+
+    private void PinnedContextMenu_Opened(object sender, RoutedEventArgs e)
+    {
+        _contextMenuOpen = true;
+        _closeTimer.Stop();
+    }
+
+    private void PinnedContextMenu_Closed(object sender, RoutedEventArgs e)
+    {
+        _contextMenuOpen = false;
+        // Check if mouse is still over the float panel
+        if (!FloatPanel.IsMouseOver && !IconStrip.IsMouseOver)
+            _closeTimer.Start();
+    }
+
+    private void PinnedRename_Click(object sender, RoutedEventArgs e)
+    {
+        if (sender is MenuItem mi && mi.DataContext is BookmarkItem item)
+        {
+            var dialog = new RenameDialog(item.Name)
+            {
+                Owner = Window.GetWindow(this)
+            };
+            if (dialog.ShowDialog() == true && !string.IsNullOrWhiteSpace(dialog.NewName))
+            {
+                item.Name = dialog.NewName;
+            }
         }
     }
 

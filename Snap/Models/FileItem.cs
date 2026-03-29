@@ -13,9 +13,9 @@ public class FileItem
     public ImageSource? Icon { get; set; }
     public int FrequencyLevel { get; set; }
 
-    public string DisplaySize => IsDirectory ? "" : FormatSize(Size);
+    public string DisplaySize => IsDirectory && Size == 0 ? "" : FormatSize(Size);
 
-    public string DisplayDate => LastModified.ToString("yyyy/MM/dd HH:mm");
+    public string DisplayDate => LastModified == DateTime.MinValue ? "" : LastModified.ToString("yyyy/MM/dd HH:mm");
 
     private static string FormatSize(long bytes)
     {

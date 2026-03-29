@@ -364,7 +364,11 @@ public partial class FilePaneControl : UserControl
 
     private async void ListView_MouseDoubleClick(object sender, MouseButtonEventArgs e)
     {
-        if (sender is ListView listView && listView.SelectedItem is FileItem item)
+        // ダブルクリック位置がアイテム上かどうかを判定
+        var hitElement = e.OriginalSource as DependencyObject;
+        var listViewItem = FindAncestor<ListViewItem>(hitElement);
+
+        if (listViewItem != null && listViewItem.Content is FileItem item)
         {
             if (ViewModel is { } vm)
             {

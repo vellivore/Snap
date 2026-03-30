@@ -64,6 +64,11 @@ public partial class MainWindow : Window
     {
         InitializeComponent();
         DataContext = _viewModel;
+
+        var version = System.Reflection.Assembly.GetExecutingAssembly().GetName().Version;
+        var versionStr = version != null ? $"v{version.Major}.{version.Minor}.{version.Build}" : "";
+        TitleText.Text = $"Snap {versionStr}";
+
         Loaded += MainWindow_Loaded;
         Closing += MainWindow_Closing;
         InstallKeyboardHook();

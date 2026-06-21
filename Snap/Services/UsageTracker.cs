@@ -54,7 +54,11 @@ public class UsageTracker
 
             Directory.CreateDirectory(Path.GetDirectoryName(UsagePath)!);
             var json = JsonSerializer.Serialize(snapshot, new JsonSerializerOptions { WriteIndented = true });
-            File.WriteAllText(UsagePath, json);
+            // Atomic write: write to a temp file then replace, so a crash/concurrent
+            // write can never leave a truncated usage.json that wipes all data on next load.
+            var tmp = UsagePath + ".tmp";
+            File.WriteAllText(tmp, json);
+            File.Move(tmp, UsagePath, overwrite: true);
         }
         catch
         {

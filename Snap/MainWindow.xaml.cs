@@ -72,6 +72,10 @@ public partial class MainWindow : Window
         Loaded += MainWindow_Loaded;
         Closing += MainWindow_Closing;
         InstallKeyboardHook();
+        // Safety net: a WH_KEYBOARD_LL hook that outlives its delegate causes system-wide
+        // input lag. Closing can be bypassed (Environment.Exit/Shutdown), so also unhook
+        // when the dispatcher begins shutting down.
+        Dispatcher.ShutdownStarted += (_, _) => UninstallKeyboardHook();
         SourceInitialized += OnSourceInitialized;
 
         // Set window icon via Win32 API for proper taskbar display
@@ -258,6 +262,15 @@ public partial class MainWindow : Window
             GetModuleHandle(curModule.ModuleName), 0);
     }
 
+    private void UninstallKeyboardHook()
+    {
+        if (_keyboardHookId != IntPtr.Zero)
+        {
+            UnhookWindowsHookEx(_keyboardHookId);
+            _keyboardHookId = IntPtr.Zero;
+        }
+    }
+
     private IntPtr LowLevelKeyboardCallback(int nCode, IntPtr wParam, IntPtr lParam)
     {
         if (nCode >= 0 && (int)wParam == WM_KEYDOWN)
@@ -308,8 +321,7 @@ public partial class MainWindow : Window
     {
         try
         {
-            if (_keyboardHookId != IntPtr.Zero)
-                UnhookWindowsHookEx(_keyboardHookId);
+            UninstallKeyboardHook();
             _viewModel.Terminal.Dispose();
             SaveSettings();
         }
@@ -689,7 +701,11 @@ public partial class MainWindow : Window
         // Wait for layout to complete (HwndHost.BuildWindowCore)
         await Dispatcher.InvokeAsync(() => { }, System.Windows.Threading.DispatcherPriority.Loaded);
 
-        // Now start shell — host window handle is ready
+        // Now start shell — host window handle is ready.
+        // Unsubscribe first so a previous open that never raised ShellWindowReady (e.g. a
+        // failed shell spawn) can't leave a duplicate subscription that fires EmbedTerminalAsync
+        // multiple times on the next successful open.
+        term.ShellWindowReady -= OnShellWindowReady;
         term.ShellWindowReady += OnShellWindowReady;
         term.Open();
     }

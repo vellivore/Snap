@@ -180,10 +180,31 @@ public partial class FolderTreeViewModel : ObservableObject
     {
         if (node.FullPath != "__dummy__")
         {
-            IsSyncing = true;
+            // The pane navigation triggered by FolderSelected completes asynchronously,
+            // so the old "IsSyncing=true/false around the synchronous Invoke" guard was
+            // already reset before SyncToPathAsync ran and never actually suppressed the
+            // redundant re-expand. Remember the path instead and skip the next sync for it.
+            _suppressSyncForPath = node.FullPath;
             FolderSelected?.Invoke(node.FullPath);
-            IsSyncing = false;
         }
+    }
+
+    /// <summary>Path whose next SyncToPathAsync should be skipped (set by tree-originated selection).</summary>
+    private string? _suppressSyncForPath;
+
+    private static bool PathsEqual(string a, string b) =>
+        string.Equals(
+            a.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar),
+            b.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar),
+            StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>True if <paramref name="fullPath"/> is the root itself or sits under it,
+    /// respecting directory-separator boundaries (so C:\Foo does not match C:\FooBar).</summary>
+    private static bool IsPathWithinRoot(string fullPath, string rootPath)
+    {
+        if (string.Equals(fullPath, rootPath, StringComparison.OrdinalIgnoreCase))
+            return true;
+        return fullPath.StartsWith(rootPath + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase);
     }
 
     /// <summary>
@@ -194,6 +215,16 @@ public partial class FolderTreeViewModel : ObservableObject
     public async Task SyncToPathAsync(string path)
     {
         if (IsSyncing) return; // ツリー起点のナビゲーション中は再帰しない
+
+        // Tree-originated navigation: the tree node is already selected/expanded, so skip the
+        // redundant re-expand for exactly that path. Any other path invalidates the pending skip.
+        if (_suppressSyncForPath != null)
+        {
+            var skip = PathsEqual(_suppressSyncForPath, path);
+            _suppressSyncForPath = null;
+            if (skip) return;
+        }
+
         IsSyncing = true;
         try
         {
@@ -226,7 +257,7 @@ public partial class FolderTreeViewModel : ObservableObject
             {
                 if (root.FullPath == FilePaneViewModel.PcViewPath) continue; // PC ノード自体はスキップ
                 var rootPath = Path.GetFullPath(root.FullPath).TrimEnd(Path.DirectorySeparatorChar);
-                if (fullPath.StartsWith(rootPath, StringComparison.OrdinalIgnoreCase))
+                if (IsPathWithinRoot(fullPath, rootPath))
                 {
                     current = root;
                     break;
@@ -242,7 +273,7 @@ public partial class FolderTreeViewModel : ObservableObject
                     foreach (var driveNode in pcNode.Children)
                     {
                         var drivePath = Path.GetFullPath(driveNode.FullPath).TrimEnd(Path.DirectorySeparatorChar);
-                        if (fullPath.StartsWith(drivePath, StringComparison.OrdinalIgnoreCase))
+                        if (IsPathWithinRoot(fullPath, drivePath))
                         {
                             pcNode.IsExpanded = true;
                             current = driveNode;

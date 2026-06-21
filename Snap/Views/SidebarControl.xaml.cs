@@ -151,7 +151,7 @@ public partial class SidebarControl : UserControl
     {
         if (sender is MenuItem mi && mi.DataContext is BookmarkItem item)
         {
-            var dialog = new RenameDialog(item.Name)
+            var dialog = new RenameDialog(item.Name, isFile: false)
             {
                 Owner = Window.GetWindow(this)
             };

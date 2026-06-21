@@ -1,4 +1,5 @@
 using System.Runtime.InteropServices;
+using System.Windows;
 using System.Windows.Interop;
 
 namespace Snap.Views;
@@ -21,6 +22,10 @@ public class TerminalHostControl : HwndHost
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool DestroyWindow(IntPtr hwnd);
 
+    [DllImport("user32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool MoveWindow(IntPtr hWnd, int X, int Y, int nWidth, int nHeight, bool bRepaint);
+
     private const int WS_CHILD = 0x40000000;
     private const int WS_VISIBLE = 0x10000000;
     private const int WS_CLIPCHILDREN = 0x02000000;
@@ -30,17 +35,28 @@ public class TerminalHostControl : HwndHost
 
     protected override HandleRef BuildWindowCore(HandleRef hwndParent)
     {
+        // Width/Height are NaN unless explicitly set, and (int)NaN == 0, which would create
+        // a 0x0 host that clips the embedded console. Use ActualWidth/ActualHeight instead.
         _hwndHost = CreateWindowEx(
             0, "static", "",
             WS_CHILD | WS_VISIBLE | WS_CLIPCHILDREN,
-            0, 0, (int)Width, (int)Height,
+            0, 0, (int)ActualWidth, (int)ActualHeight,
             hwndParent.Handle, IntPtr.Zero, IntPtr.Zero, IntPtr.Zero);
 
         return new HandleRef(this, _hwndHost);
     }
 
+    protected override void OnRenderSizeChanged(SizeChangedInfo sizeInfo)
+    {
+        base.OnRenderSizeChanged(sizeInfo);
+        // Keep the host window in sync with the WPF layout slot.
+        if (_hwndHost != IntPtr.Zero)
+            MoveWindow(_hwndHost, 0, 0, (int)ActualWidth, (int)ActualHeight, true);
+    }
+
     protected override void DestroyWindowCore(HandleRef hwnd)
     {
         DestroyWindow(hwnd.Handle);
+        _hwndHost = IntPtr.Zero;
     }
 }

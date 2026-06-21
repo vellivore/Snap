@@ -7,7 +7,7 @@ public partial class RenameDialog : Window
 {
     public string NewName { get; private set; } = string.Empty;
 
-    public RenameDialog(string currentName)
+    public RenameDialog(string currentName, bool isFile = true)
     {
         InitializeComponent();
         NameTextBox.Text = currentName;
@@ -17,8 +17,9 @@ public partial class RenameDialog : Window
         {
             NameTextBox.Focus();
 
-            // Select filename without extension
-            var dotIndex = currentName.LastIndexOf('.');
+            // Select the name without its extension — only for files. Folder and tab names
+            // may legitimately contain dots (e.g. "my.folder"), so select the whole name.
+            var dotIndex = isFile ? currentName.LastIndexOf('.') : -1;
             if (dotIndex > 0)
             {
                 NameTextBox.Select(0, dotIndex);

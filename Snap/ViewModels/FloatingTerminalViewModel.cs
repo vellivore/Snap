@@ -17,6 +17,7 @@ public partial class FloatingTerminalViewModel : ObservableObject, IDisposable
     private bool _isVisible;
 
     private Process? _shellProcess;
+    private EventHandler? _exitedHandler;
     private bool _disposed;
 
     // Unused but kept for compatibility (XAML bindings)
@@ -186,13 +187,18 @@ public partial class FloatingTerminalViewModel : ObservableObject, IDisposable
                 EnableRaisingEvents = true,
             };
 
-            _shellProcess.Exited += (s, e) =>
+            // Capture the process this handler belongs to. A previous conhost that exits
+            // after a restart must not kill the *current* shell, so only react when the
+            // process that fired Exited is still the live _shellProcess.
+            var proc = _shellProcess;
+            _exitedHandler = (s, e) =>
             {
                 System.Windows.Application.Current?.Dispatcher.BeginInvoke(() =>
                 {
-                    if (IsVisible) Close();
+                    if (ReferenceEquals(s, _shellProcess) && IsVisible) Close();
                 });
             };
+            _shellProcess.Exited += _exitedHandler;
 
             _shellProcess.Start();
             var pid = _shellProcess.Id;
@@ -202,6 +208,12 @@ public partial class FloatingTerminalViewModel : ObservableObject, IDisposable
             for (int i = 0; i < 50; i++) // max 5 seconds
             {
                 await Task.Delay(100);
+
+                // Bail if this VM was disposed or a newer StartShell/StopShell replaced
+                // the process while we were polling — otherwise we would arm embedding for
+                // an already-killed process and leave a dangling handle.
+                if (_disposed || !ReferenceEquals(_shellProcess, proc))
+                    return;
 
                 var hwnd = FindWindowByProcessTree(pid);
                 if (hwnd != IntPtr.Zero)
@@ -228,6 +240,9 @@ public partial class FloatingTerminalViewModel : ObservableObject, IDisposable
         ShellWindowHandle = IntPtr.Zero;
         if (_shellProcess != null)
         {
+            // Detach Exited before disposing so a stale handler can't fire against a new shell.
+            if (_exitedHandler != null)
+                _shellProcess.Exited -= _exitedHandler;
             try
             {
                 if (!_shellProcess.HasExited)
@@ -238,6 +253,7 @@ public partial class FloatingTerminalViewModel : ObservableObject, IDisposable
             {
                 _shellProcess.Dispose();
                 _shellProcess = null;
+                _exitedHandler = null;
             }
         }
     }

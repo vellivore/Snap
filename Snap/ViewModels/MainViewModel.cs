@@ -139,32 +139,46 @@ public partial class MainViewModel : ObservableObject
 
     private async void OnTrackedTabPropertyChanged(object? sender, PropertyChangedEventArgs e)
     {
-        if (e.PropertyName == nameof(FilePaneViewModel.CurrentPath) && sender is FilePaneViewModel tab)
+        // async void event handler: an unhandled exception here would crash the app,
+        // so swallow at the top level (SyncToPathAsync already logs/handles internally).
+        try
         {
-            await FolderTree.SyncToPathAsync(tab.CurrentPath);
-            // Start 2s timer — only add to Today if user stays in this folder
-            _todayTimer.Stop();
-            _pendingTodayPath = tab.CurrentPath;
-            _todayTimer.Start();
+            if (e.PropertyName == nameof(FilePaneViewModel.CurrentPath) && sender is FilePaneViewModel tab)
+            {
+                await FolderTree.SyncToPathAsync(tab.CurrentPath);
+                // Start 2s timer — only add to Today if user stays in this folder
+                _todayTimer.Stop();
+                _pendingTodayPath = tab.CurrentPath;
+                _todayTimer.Start();
+            }
         }
+        catch { }
     }
 
     private async void OnTreeFolderSelected(string path)
     {
-        var pane = ActivePane ?? TopLeftPane;
-        if (pane.SelectedTab != null)
+        try
         {
-            await pane.SelectedTab.NavigateToAsync(path);
+            var pane = ActivePane ?? TopLeftPane;
+            if (pane.SelectedTab != null)
+            {
+                await pane.SelectedTab.NavigateToAsync(path);
+            }
         }
+        catch { }
     }
 
     private async void OnSidebarNavigate(string path)
     {
-        var pane = ActivePane ?? TopLeftPane;
-        if (pane.SelectedTab != null)
+        try
         {
-            await pane.SelectedTab.NavigateToAsync(path);
+            var pane = ActivePane ?? TopLeftPane;
+            if (pane.SelectedTab != null)
+            {
+                await pane.SelectedTab.NavigateToAsync(path);
+            }
         }
+        catch { }
     }
 
 }

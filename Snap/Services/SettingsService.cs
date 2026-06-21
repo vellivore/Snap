@@ -43,7 +43,12 @@ public static class SettingsService
         {
             Directory.CreateDirectory(SettingsDir);
             var json = JsonSerializer.Serialize(settings, JsonOptions);
-            File.WriteAllText(SettingsPath, json);
+            // Atomic write: write to a temp file then replace, so a crash/concurrent
+            // write can never leave a truncated settings.json that resets the user's
+            // window layout / bookmarks / tabs on next load.
+            var tmp = SettingsPath + ".tmp";
+            File.WriteAllText(tmp, json);
+            File.Move(tmp, SettingsPath, overwrite: true);
         }
         catch
         {

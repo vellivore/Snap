@@ -23,6 +23,11 @@ public partial class TabPaneControl : UserControl
     private const double TabDragThreshold = 5.0;
     private readonly DragGhostHelper _dragGhost = new();
 
+    // Icon-update handlers subscribed per tab in CreateTabHeader. Tracked so they can be
+    // unsubscribed on every rebuild — otherwise each rebuild (any tab add/remove/move)
+    // accumulates a stale lambda that keeps discarded Image controls and tab VMs alive.
+    private readonly List<(FilePaneViewModel tab, PropertyChangedEventHandler handler)> _iconHandlers = new();
+
     public TabPaneControl()
     {
         InitializeComponent();
@@ -60,6 +65,11 @@ public partial class TabPaneControl : UserControl
 
     private void RebuildTabHeaders()
     {
+        // Detach icon-update handlers from the previous build before discarding the headers.
+        foreach (var (tab, handler) in _iconHandlers)
+            tab.PropertyChanged -= handler;
+        _iconHandlers.Clear();
+
         TabHeaderPanel.Children.Clear();
 
         if (DataContext is not TabPaneViewModel vm) return;
@@ -103,8 +113,8 @@ public partial class TabPaneControl : UserControl
         // 初期アイコン設定
         var (initIcon, _) = IconHelper.GetIconAndType(tab.CurrentPath, true);
         tabIcon.Source = initIcon;
-        // CurrentPath 変更時にアイコンを更新
-        tab.PropertyChanged += (s, e) =>
+        // CurrentPath 変更時にアイコンを更新（ハンドラは _iconHandlers で保持し、再構築時に解除）
+        PropertyChangedEventHandler iconHandler = (s, e) =>
         {
             if (e.PropertyName == nameof(FilePaneViewModel.CurrentPath) && s is FilePaneViewModel vm)
             {
@@ -112,6 +122,8 @@ public partial class TabPaneControl : UserControl
                 tabIcon.Source = icon;
             }
         };
+        tab.PropertyChanged += iconHandler;
+        _iconHandlers.Add((tab, iconHandler));
 
         var textBlock = new TextBlock
         {
@@ -296,7 +308,7 @@ public partial class TabPaneControl : UserControl
         };
         renameItem.Click += (_, _) =>
         {
-            var dialog = new RenameDialog(tab.TabHeader)
+            var dialog = new RenameDialog(tab.TabHeader, isFile: false)
             {
                 Owner = Window.GetWindow(this)
             };
@@ -398,8 +410,12 @@ public partial class TabPaneControl : UserControl
         // 元のペインの最後のタブは移動しない（空ペインになるため）
         if (sourcePaneVm.Tabs.Count <= 1) return;
 
+        // Removing from an ObservableCollection does not auto-null SelectedTab, so if the
+        // moved tab was selected we must repoint it — otherwise the source pane keeps a
+        // SelectedTab that is no longer in its Tabs list.
+        var wasSelected = sourcePaneVm.SelectedTab == sourceTab;
         sourcePaneVm.Tabs.Remove(sourceTab);
-        if (sourcePaneVm.SelectedTab == null && sourcePaneVm.Tabs.Count > 0)
+        if ((wasSelected || sourcePaneVm.SelectedTab == null) && sourcePaneVm.Tabs.Count > 0)
             sourcePaneVm.SelectedTab = sourcePaneVm.Tabs[0];
 
         targetPaneVm.Tabs.Add(sourceTab);

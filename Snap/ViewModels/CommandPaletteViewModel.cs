@@ -295,8 +295,10 @@ public partial class CommandPaletteViewModel : ObservableObject
 
     private async Task UpdateResultsAsync(string query)
     {
-        _searchCts?.Cancel();
+        var oldCts = _searchCts;
+        oldCts?.Cancel();
         _searchCts = new CancellationTokenSource();
+        oldCts?.Dispose();
         var token = _searchCts.Token;
 
         Results.Clear();
@@ -505,6 +507,9 @@ public partial class CommandPaletteViewModel : ObservableObject
                     batch.Clear();
                     Application.Current.Dispatcher.Invoke(() =>
                     {
+                        // A newer search may have cancelled this one and cleared Results
+                        // between the Count check and the Add; bail before touching Results.
+                        if (token.IsCancellationRequested) return;
                         foreach (var item in toAdd)
                             Results.Add(item);
                         if (SelectedItem == null && Results.Count > 0)
@@ -607,8 +612,11 @@ public partial class CommandPaletteViewModel : ObservableObject
 
                             Application.Current.Dispatcher.Invoke(() =>
                             {
+                                // A newer search may have cancelled this one and cleared
+                                // Results; bail before touching the (possibly empty) list.
+                                if (token.IsCancellationRequested) return;
                                 Results.Add(item);
-                                if (SelectedItem == null)
+                                if (SelectedItem == null && Results.Count > 0)
                                     SelectedItem = Results[0];
                                 SearchStatusText = $"ファイル内検索中... {Results.Count}件";
                             });

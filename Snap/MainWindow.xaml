@@ -10,8 +10,7 @@
         AllowsTransparency="True"
         Background="Transparent"
         ResizeMode="CanResizeWithGrip"
-        PreviewKeyDown="Window_PreviewKeyDown"
-        PreviewKeyUp="Window_PreviewKeyUp">
+        PreviewKeyDown="Window_PreviewKeyDown">
 
     <!-- Window-wide shortcuts (#14). List-only keys (Backspace, Enter, Alt+Enter, Ctrl+Shift+C/F)
          are in FilePaneControl; Ctrl+Space / Ctrl+T are added in code (they drive the view). -->

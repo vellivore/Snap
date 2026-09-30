@@ -127,6 +127,7 @@
                   x:Name="FileListView"
                   ItemsSource="{Binding Items}"
                   SelectedItem="{Binding SelectedItem, Mode=TwoWay}"
+                  SelectionChanged="FileListView_SelectionChanged"
                   MouseDoubleClick="ListView_MouseDoubleClick"
                   PreviewMouseDown="FileListView_PreviewMouseDown"
                   IsTextSearchEnabled="True"

@@ -39,12 +39,6 @@ public partial class FilePaneControl : UserControl
         remove => RemoveHandler(AddBookmarkRequestedEvent, value);
     }
 
-    /// <summary>Asks the window to refresh the other panes showing some folders
-    /// (<see cref="RefreshPanesRequestedEventArgs"/>); handled by MainViewModel.RefreshPanesShowing.</summary>
-    public static readonly RoutedEvent RefreshPanesRequestedEvent =
-        EventManager.RegisterRoutedEvent("RefreshPanesRequested", RoutingStrategy.Bubble,
-            typeof(RoutedEventHandler), typeof(FilePaneControl));
-
     /// <summary>Asks the window to open a folder in a new tab next to this one
     /// (<see cref="OpenInNewTabRequestedEventArgs"/>); handled by MainViewModel.OpenInNewTab (#14).</summary>
     public static readonly RoutedEvent OpenInNewTabRequestedEvent =
@@ -125,11 +119,15 @@ public partial class FilePaneControl : UserControl
     private void OnDataContextChanged(object sender, DependencyPropertyChangedEventArgs e)
     {
         if (e.OldValue is FilePaneViewModel oldVm)
+        {
             oldVm.PropertyChanged -= OnViewModelPropertyChanged;
+            oldVm.RevealRequested -= OnRevealRequested;
+        }
 
         if (e.NewValue is FilePaneViewModel newVm)
         {
             newVm.PropertyChanged += OnViewModelPropertyChanged;
+            newVm.RevealRequested += OnRevealRequested;
             RebuildBreadcrumb(newVm.CurrentPath);
             _shownPath = newVm.CurrentPath;
             // Tab switch (Ctrl+Tab etc.): if the list had the focus, it keeps it.
@@ -238,6 +236,32 @@ public partial class FilePaneControl : UserControl
                     FileListView.Focus();
             }
             catch (Exception ex) { Log.Warn("FilePane.FocusList", "focus not restored", ex); }
+        });
+    }
+
+    private void FileListView_SelectionChanged(object sender, SelectionChangedEventArgs e) =>
+        ViewModel?.SetSelection(FileListView.SelectedItems);
+
+    /// <summary>
+    /// After a rename / new folder (#15): selects <paramref name="item"/> alone and scrolls to it.
+    /// The list takes the keyboard focus back only if it had it (the dialog took it meanwhile).
+    /// </summary>
+    private void OnRevealRequested(FileItem item)
+    {
+        if (ListShouldKeepFocus())
+        {
+            FocusListAfterLayout(item, newFolder: true);
+            return;
+        }
+        Dispatcher.BeginInvoke(System.Windows.Threading.DispatcherPriority.Loaded, () =>
+        {
+            try
+            {
+                FileListView.UnselectAll();
+                FileListView.SelectedItem = item;
+                FileListView.ScrollIntoView(item);
+            }
+            catch (Exception ex) { Log.Warn("FilePane.Reveal", item.FullPath, ex); }
         });
     }
 
@@ -567,7 +591,7 @@ public partial class FilePaneControl : UserControl
         else if (ViewModel is { } vm)
         {
             // Blank area: go up (drive root → PC view; nothing above the PC view)
-            await vm.GoUp();
+            await vm.GoUpAsync();
         }
     }
 
@@ -643,7 +667,7 @@ public partial class FilePaneControl : UserControl
         if (e.Key == Key.Back && Keyboard.Modifiers == ModifierKeys.None)
         {
             e.Handled = true;
-            await vm.GoUp();
+            await vm.GoUpAsync();
             return;
         }
 
@@ -657,7 +681,7 @@ public partial class FilePaneControl : UserControl
             {
                 Key.Left => vm.GoBack(),
                 Key.Right => vm.GoForward(),
-                _ => vm.GoUp(),
+                _ => vm.GoUpAsync(),
             });
             return;
         }
@@ -685,10 +709,22 @@ public partial class FilePaneControl : UserControl
             return;
         }
 
-        if (e.Key == Key.Delete)
+        // Delete → recycle bin; Shift+Delete → delete for good (#15)
+        if (e.Key == Key.Delete && Keyboard.Modifiers is ModifierKeys.None or ModifierKeys.Shift)
         {
-            await vm.DeleteItems(FileListView.SelectedItems);
             e.Handled = true;
+            if (Keyboard.Modifiers == ModifierKeys.Shift)
+                await vm.DeleteItemsPermanently(FileListView.SelectedItems);
+            else
+                await vm.DeleteItems(FileListView.SelectedItems);
+            return;
+        }
+
+        // Ctrl+Shift+N → new folder, then rename it right away (#15)
+        if (e.Key == Key.N && Keyboard.Modifiers == (ModifierKeys.Control | ModifierKeys.Shift))
+        {
+            e.Handled = true;
+            await vm.NewFolderAsync();
             return;
         }
 
@@ -829,7 +865,12 @@ public partial class FilePaneControl : UserControl
             foreach (var pane in allPanes) pane.SetAllowDrop(false);
             _shellMenuOpen = true;
 
-            Action onRefresh = () => Dispatcher.BeginInvoke(() => vm?.Refresh().SafeFireAndForget("FilePane.Refresh", "更新できません"));
+            // A shell command can change this folder, the items' folders and (paste of a cut) the
+            // folders the clipboard files came from; the panes showing any of them refresh (#15).
+            var clipboardFolders = FilePaneViewModel.ClipboardSourceFolders();
+            var menuPaths = paths;
+            Action onRefresh = () => Dispatcher.BeginInvoke(() => vm.RefreshAfterShellCommandAsync(menuPaths, clipboardFolders)
+                .SafeFireAndForget("FilePane.Refresh", "更新できません"));
             Action onMenuReady = () => Mouse.OverrideCursor = null;
 
             if (paths != null)
@@ -1015,66 +1056,17 @@ public partial class FilePaneControl : UserControl
         // Verify this is a genuine user-initiated drag (not a phantom drop from shell menu)
         if (e.AllowedEffects == DragDropEffects.None) { e.Handled = true; return; }
 
-        string[]? sourcePaths = e.Data.GetData(DataFormats.FileDrop) as string[];
-        if (sourcePaths == null || sourcePaths.Length == 0) return;
+        if (e.Data.GetData(DataFormats.FileDrop) is not string[] { Length: > 0 } sourcePaths) return;
+        e.Handled = true;
 
-        // Determine target folder
-        string targetFolder;
-        var targetItem = GetFileItemUnderMouse(e);
-        if (targetItem is { IsDirectory: true })
-        {
-            targetFolder = targetItem.FullPath;
-        }
-        else
-        {
-            targetFolder = vm.CurrentPath;
-        }
-
-        // Don't drop onto the same folder the items are already in
-        if (sourcePaths.All(p =>
-            string.Equals(Path.GetDirectoryName(p), targetFolder, StringComparison.OrdinalIgnoreCase)))
-        {
-            return;
-        }
-
-        // PC ビュー（ドライブ一覧）にはドロップできない
-        if (string.Equals(targetFolder, FilePaneViewModel.PcViewPath, StringComparison.OrdinalIgnoreCase))
-        {
-            vm.StatusMessage = "ここにはドロップできません";
-            return;
-        }
-
-        // Ctrl 押下でコピー、それ以外は移動
+        // Hit test only: a folder under the mouse is the target, else this pane's folder.
+        // Ctrl = copy, otherwise move. The operation itself is the view model's (#15).
+        var targetFolder = GetFileItemUnderMouse(e) is { IsDirectory: true } folder ? folder.FullPath : vm.CurrentPath;
         bool isCopy = (e.KeyStates & DragDropKeyStates.ControlKey) != 0;
 
-        try
-        {
-            // Shell の IFileOperation で実行（UAC 昇格・進捗・名前衝突ダイアログはシェルに任せる）
-            var result = isCopy
-                ? await ShellFileOperation.CopyAsync(sourcePaths, targetFolder)
-                : await ShellFileOperation.MoveAsync(sourcePaths, targetFolder);
-
-            if (!result.Success && !result.Aborted)
-                Log.Warn("FilePane.Drop", $"{(isCopy ? "copy" : "move")} to {targetFolder} failed: {result.Error}");
-
-            vm.StatusMessage = result.Success
-                ? (isCopy ? $"{sourcePaths.Length} 項目をコピーしました" : $"{sourcePaths.Length} 項目を移動しました")
-                : result.Aborted
-                    ? "操作がキャンセルされました"
-                    : $"{(isCopy ? "コピー" : "移動")}エラー: {result.Error}";
-
-            // Refresh all panes that might be affected
-            try { await vm.Refresh(); }
-            catch (Exception ex) { Log.Warn("FilePane.Drop", "refresh after drop failed", ex); }
-            RequestRefreshOfSourceFolders(sourcePaths, vm);
-        }
-        catch (Exception ex)
-        {
-            Log.Error("FilePane.Drop", targetFolder, ex);
-            vm.StatusMessage = $"エラー: {ex.Message}";
-        }
-
-        e.Handled = true;
+        // async void event handler: nothing may escape to the dispatcher (#13).
+        try { await vm.DropFilesAsync(sourcePaths, targetFolder, isCopy); }
+        catch (Exception ex) { Log.UserError("FilePane.Drop", $"ドロップできません（{targetFolder}）", ex); }
     }
 
     /// <summary>
@@ -1098,31 +1090,6 @@ public partial class FilePaneControl : UserControl
 
         return null;
     }
-
-    /// <summary>
-    /// ドラッグ元のフォルダを表示している他のペインの更新を MainViewModel に頼む。
-    /// </summary>
-    private void RequestRefreshOfSourceFolders(string[] sourcePaths, FilePaneViewModel excludeVm)
-    {
-        var sourceDirs = sourcePaths
-            .Select(p => Path.GetDirectoryName(p))
-            .Where(d => d != null)
-            .Select(d => d!)
-            .Distinct(StringComparer.OrdinalIgnoreCase)
-            .ToList();
-
-        if (sourceDirs.Count == 0) return;
-        RaiseEvent(new RefreshPanesRequestedEventArgs(RefreshPanesRequestedEvent, this, sourceDirs, excludeVm));
-    }
-}
-
-/// <summary>Folders whose panes should be refreshed, and the tab that already was.</summary>
-public sealed class RefreshPanesRequestedEventArgs(
-    RoutedEvent routedEvent, object source, IReadOnlyList<string> folders, FilePaneViewModel? except)
-    : RoutedEventArgs(routedEvent, source)
-{
-    public IReadOnlyList<string> Folders { get; } = folders;
-    public FilePaneViewModel? Except { get; } = except;
 }
 
 /// <summary>Open <see cref="Path"/> in a new tab next to <see cref="From"/> (#14).</summary>

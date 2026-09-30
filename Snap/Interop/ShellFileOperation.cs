@@ -5,7 +5,7 @@ using System.Windows.Interop;
 namespace Snap.Interop;
 
 /// <summary>
-/// Windows Shell の IFileOperation を使ってコピー/移動/削除を行うラッパー。
+/// Windows Shell の IFileOperation を使ってコピー/移動/削除/新規フォルダー/名前変更を行うラッパー。
 /// 管理者権限が必要な宛先（C:\ 直下等）では UAC 昇格プロンプトを自動表示し、
 /// 進捗 UI・名前衝突ダイアログ・ごみ箱（元に戻す）にも対応する（エクスプローラ同等）。
 /// </summary>
@@ -13,18 +13,51 @@ public static class ShellFileOperation
 {
     public readonly record struct Result(bool Success, bool Aborted, string? Error);
 
-    private enum Op { Copy, Move, Delete }
-
     public static Task<Result> CopyAsync(IReadOnlyList<string> sources, string destDir)
-        => RunAsync(Op.Copy, sources, destDir);
+        => RunAsync("Copy", UndoableFlags, fo => QueueEach(sources, destDir, (item, src, dest) =>
+            // 同じフォルダへのコピーはシェルが黙って中断するため、重複しない名前を渡す
+            fo.CopyItem(item, dest!, SameFolderCopyName(src, destDir), IntPtr.Zero)));
 
     public static Task<Result> MoveAsync(IReadOnlyList<string> sources, string destDir)
-        => RunAsync(Op.Move, sources, destDir);
+        => RunAsync("Move", UndoableFlags, fo => QueueEach(sources, destDir, (item, _, dest) =>
+            fo.MoveItem(item, dest!, null, IntPtr.Zero)));
 
-    public static Task<Result> DeleteAsync(IReadOnlyList<string> sources)
-        => RunAsync(Op.Delete, sources, null);
+    /// <summary>
+    /// 削除。既定はごみ箱へ（元に戻せる）。Snap 側で確認済みなのでシェルの確認は出さない（二重確認を避ける）。
+    /// <paramref name="permanent"/>（Shift+Delete）は FOF_ALLOWUNDO を外して完全に削除し、
+    /// 取り返しがつかないので FOF_NOCONFIRMATION も外してシェルの確認に任せる。
+    /// </summary>
+    public static Task<Result> DeleteAsync(IReadOnlyList<string> sources, bool permanent = false)
+        => RunAsync(permanent ? "DeletePermanently" : "Delete",
+            permanent ? FOF_NOCONFIRMMKDIR : UndoableFlags | FOF_NOCONFIRMATION,
+            fo => QueueEach(sources, null, (item, _, _) => fo.DeleteItem(item, IntPtr.Zero)));
 
-    private static Task<Result> RunAsync(Op op, IReadOnlyList<string> sources, string? destDir)
+    /// <summary>
+    /// <paramref name="dir"/> にフォルダー <paramref name="name"/> を作る（IFileOperation.NewItem・元に戻せる）。
+    /// 名前の重複は呼び出し側で避けておくこと。
+    /// </summary>
+    public static Task<Result> NewFolderAsync(string dir, string name)
+        => RunAsync("NewFolder", UndoableFlags, fo =>
+        {
+            var folder = CreateItem(dir);
+            try { return fo.NewItem(folder, FILE_ATTRIBUTE_DIRECTORY, name, null, IntPtr.Zero) >= 0 ? 1 : 0; }
+            finally { Marshal.ReleaseComObject(folder); }
+        });
+
+    /// <summary><paramref name="path"/> の名前を <paramref name="newName"/> に変える（IFileOperation.RenameItem・UAC と元に戻すに対応）。</summary>
+    public static Task<Result> RenameAsync(string path, string newName)
+        => RunAsync("Rename", UndoableFlags, fo =>
+        {
+            var item = CreateItem(path);
+            try { return fo.RenameItem(item, newName, IntPtr.Zero) >= 0 ? 1 : 0; }
+            finally { Marshal.ReleaseComObject(item); }
+        });
+
+    // Copy/Move の上書き確認・名前衝突はシェルに任せる（FOF_NOCONFIRMATION を付けない）。
+    private const uint UndoableFlags = FOFX_ADDUNDORECORD | FOF_ALLOWUNDO | FOF_NOCONFIRMMKDIR;
+
+    /// <param name="queue">操作を積み、積めた数を返す（0 なら「対象が見つかりません」）。</param>
+    private static Task<Result> RunAsync(string name, uint flags, Func<IFileOperation, int> queue)
     {
         var tcs = new TaskCompletionSource<Result>(TaskCreationOptions.RunContinuationsAsynchronously);
         IntPtr owner;
@@ -39,10 +72,10 @@ public static class ShellFileOperation
         // UI スレッドをブロックしないよう専用 STA スレッドで実行する。
         var thread = new Thread(() =>
         {
-            try { tcs.TrySetResult(Execute(op, sources, destDir, owner)); }
+            try { tcs.TrySetResult(Execute(flags, queue, owner)); }
             catch (Exception ex)
             {
-                Snap.Services.Log.Error("ShellFileOperation", $"{op} failed", ex);
+                Snap.Services.Log.Error("ShellFileOperation", $"{name} failed", ex);
                 tcs.TrySetResult(new Result(false, false, ex.Message));
             }
         })
@@ -70,28 +103,44 @@ public static class ShellFileOperation
         });
     }
 
-    private static Result Execute(Op op, IReadOnlyList<string> sources, string? destDir, IntPtr owner)
+    private static Result Execute(uint flags, Func<IFileOperation, int> queue, IntPtr owner)
     {
         var type = Type.GetTypeFromCLSID(CLSID_FileOperation)
             ?? throw new InvalidOperationException("IFileOperation は利用できません");
         var fo = (IFileOperation)Activator.CreateInstance(type)!;
-        IShellItem? dest = null;
         try
         {
             if (owner != IntPtr.Zero)
                 fo.SetOwnerWindow(owner);
-            uint flags = FOFX_ADDUNDORECORD | FOF_ALLOWUNDO | FOF_NOCONFIRMMKDIR;
-            // 削除は Snap 側で確認済みなのでシェルの確認は出さない（二重確認を避ける）。
-            // Copy/Move の上書き確認はシェルに任せるため付けない。
-            if (op == Op.Delete) flags |= FOF_NOCONFIRMATION;
             ThrowIfFailed(fo.SetOperationFlags(flags));
 
-            if (op != Op.Delete)
-            {
-                if (string.IsNullOrEmpty(destDir))
-                    throw new ArgumentException("コピー/移動先が指定されていません");
+            if (queue(fo) == 0)
+                return new Result(false, false, "対象が見つかりません");
+
+            int hr = fo.PerformOperations();
+            fo.GetAnyOperationsAborted(out bool aborted);
+
+            if (hr == COPYENGINE_E_USER_CANCELLED)
+                return new Result(false, true, DescribeHResult(hr));
+            if (hr < 0)
+                return new Result(false, aborted, DescribeHResult(hr));
+            return new Result(!aborted, aborted, null);
+        }
+        finally
+        {
+            Marshal.ReleaseComObject(fo);
+        }
+    }
+
+    /// <summary>Queues one operation per source (unresolvable sources are skipped) and returns how many were queued.</summary>
+    private static int QueueEach(IReadOnlyList<string> sources, string? destDir,
+        Func<IShellItem, string, IShellItem?, int> queueOne)
+    {
+        IShellItem? dest = null;
+        try
+        {
+            if (destDir != null)
                 dest = CreateItem(destDir);
-            }
 
             int queued = 0;
             foreach (var src in sources)
@@ -106,34 +155,15 @@ public static class ShellFileOperation
                 }
                 try
                 {
-                    int qhr = op switch
-                    {
-                        // 同じフォルダへのコピーはシェルが黙って中断するため、重複しない名前を渡す
-                        Op.Copy => fo.CopyItem(item, dest!, SameFolderCopyName(src, destDir!), IntPtr.Zero),
-                        Op.Move => fo.MoveItem(item, dest!, null, IntPtr.Zero),
-                        _ => fo.DeleteItem(item, IntPtr.Zero),
-                    };
-                    if (qhr >= 0) queued++;
+                    if (queueOne(item, src, dest) >= 0) queued++;
                 }
                 finally { Marshal.ReleaseComObject(item); }
             }
-
-            if (queued == 0)
-                return new Result(false, false, "対象が見つかりません");
-
-            int hr = fo.PerformOperations();
-            fo.GetAnyOperationsAborted(out bool aborted);
-
-            if (hr == COPYENGINE_E_USER_CANCELLED)
-                return new Result(false, true, DescribeHResult(hr));
-            if (hr < 0)
-                return new Result(false, aborted, DescribeHResult(hr));
-            return new Result(!aborted, aborted, null);
+            return queued;
         }
         finally
         {
             if (dest != null) Marshal.ReleaseComObject(dest);
-            Marshal.ReleaseComObject(fo);
         }
     }
 
@@ -144,23 +174,12 @@ public static class ShellFileOperation
     {
         var trimmed = src.TrimEnd(System.IO.Path.DirectorySeparatorChar, System.IO.Path.AltDirectorySeparatorChar);
         var parent = System.IO.Path.GetDirectoryName(trimmed);
-        if (parent == null) return null;
-        var normDest = destDir.TrimEnd(System.IO.Path.DirectorySeparatorChar, System.IO.Path.AltDirectorySeparatorChar);
-        if (!string.Equals(parent.TrimEnd(System.IO.Path.DirectorySeparatorChar), normDest, StringComparison.OrdinalIgnoreCase))
+        if (parent == null || !Snap.Services.FileSystemService.SamePath(parent, destDir))
             return null;
 
         var name = System.IO.Path.GetFileName(trimmed);
         bool isDir = System.IO.Directory.Exists(trimmed);
-        var baseName = isDir ? name : System.IO.Path.GetFileNameWithoutExtension(name);
-        var ext = isDir ? "" : System.IO.Path.GetExtension(name);
-        for (int n = 2; n < 10000; n++)
-        {
-            var candidate = $"{baseName} ({n}){ext}";
-            var full = System.IO.Path.Combine(normDest, candidate);
-            if (!System.IO.File.Exists(full) && !System.IO.Directory.Exists(full))
-                return candidate;
-        }
-        return null;
+        return Snap.Services.FileSystemService.UniqueName(destDir, name, isDir, keepOriginal: false);
     }
 
     private static string DescribeHResult(int hr) => hr switch
@@ -183,6 +202,7 @@ public static class ShellFileOperation
 
     // ==================== COM interop ====================
 
+    private const uint FILE_ATTRIBUTE_DIRECTORY = 0x0010;
     private const uint FOF_NOCONFIRMATION = 0x0010;
     private const uint FOF_ALLOWUNDO = 0x0040;
     private const uint FOF_NOCONFIRMMKDIR = 0x0200;
@@ -218,7 +238,7 @@ public static class ShellFileOperation
         [PreserveSig] int CopyItems(IntPtr punkItems, IShellItem psiDestinationFolder);
         [PreserveSig] int DeleteItem(IShellItem psiItem, IntPtr pfopsItem);
         [PreserveSig] int DeleteItems(IntPtr punkItems);
-        [PreserveSig] int NewItem(IShellItem psiDestinationFolder, uint dwFileAttributes, [MarshalAs(UnmanagedType.LPWStr)] string pszName, [MarshalAs(UnmanagedType.LPWStr)] string pszTemplateName, IntPtr pfopsItem);
+        [PreserveSig] int NewItem(IShellItem psiDestinationFolder, uint dwFileAttributes, [MarshalAs(UnmanagedType.LPWStr)] string pszName, [MarshalAs(UnmanagedType.LPWStr)] string? pszTemplateName, IntPtr pfopsItem);
         [PreserveSig] int PerformOperations();
         [PreserveSig] int GetAnyOperationsAborted([MarshalAs(UnmanagedType.Bool)] out bool pfAnyOperationsAborted);
     }

@@ -1,6 +1,5 @@
 using System.Collections.ObjectModel;
 using System.IO;
-using System.Runtime.InteropServices;
 using CommunityToolkit.Mvvm.ComponentModel;
 using Snap.Helpers;
 using Snap.Models;
@@ -88,22 +87,8 @@ public partial class FolderTreeViewModel : ObservableObject
         // PC ノード（ドライブ一覧を子に持つ）
         var pcNode = new TreeNode { Name = "PC", FullPath = FilePaneViewModel.PcViewPath };
         pcNode.RemoveDummyChild(); // ダミー子を除去、直接ドライブを追加
-        foreach (var drive in DriveInfo.GetDrives())
-        {
-            try
-            {
-                var label = drive.IsReady
-                    ? $"{drive.VolumeLabel} ({drive.Name.TrimEnd('\\')})"
-                    : drive.Name.TrimEnd('\\');
-                var driveNode = CreateNode(label, drive.Name);
-                pcNode.Children.Add(driveNode);
-            }
-            catch (Exception ex)
-            {
-                // ドライブ情報取得失敗は無視
-                Log.Warn("FolderTree.Drives", drive.Name, ex);
-            }
-        }
+        foreach (var drive in FileSystemService.GetDrives(out _))
+            pcNode.Children.Add(CreateNode(drive.Label, drive.RootPath));
         roots.Add(pcNode);
 
         return roots;
@@ -120,35 +105,12 @@ public partial class FolderTreeViewModel : ObservableObject
             var list = new List<TreeNode>();
 
             // UNC server path → enumerate shares
-            if (IsUncServerPath(node.FullPath))
+            if (FileSystemService.IsUncServerPath(node.FullPath))
             {
                 try
                 {
-                    int resumeHandle = 0;
-                    int result = NetShareEnum(node.FullPath.TrimEnd('\\'), 1, out var bufPtr, -1,
-                        out int entriesRead, out _, ref resumeHandle);
-                    if (result == 0 && bufPtr != IntPtr.Zero)
-                    {
-                        try
-                        {
-                            var structSize = Marshal.SizeOf<SHARE_INFO_1>();
-                            var ptr = bufPtr;
-                            for (int i = 0; i < entriesRead; i++)
-                            {
-                                var info = Marshal.PtrToStructure<SHARE_INFO_1>(ptr);
-                                ptr = IntPtr.Add(ptr, structSize);
-                                if (info.shi1_netname.EndsWith('$')) continue;
-                                if ((info.shi1_type & ~0x80000000u) != 0) continue;
-                                var sharePath = $"{node.FullPath.TrimEnd('\\')}\\{info.shi1_netname}";
-                                list.Add(CreateNode(info.shi1_netname, sharePath));
-                            }
-                        }
-                        finally { NetApiBufferFree(bufPtr); }
-                    }
-                    else
-                    {
-                        Log.Warn("FolderTree.Expand", $"NetShareEnum {node.FullPath} returned {result}");
-                    }
+                    foreach (var share in FileSystemService.GetShares(node.FullPath))
+                        list.Add(CreateNode(share.Name, share.FullPath));
                 }
                 catch (Exception ex) { Log.Warn("FolderTree.Expand", $"share enumeration failed: {node.FullPath}", ex); }
                 return list;
@@ -423,32 +385,6 @@ public partial class FolderTreeViewModel : ObservableObject
             node.IsSelected = false;
             DeselectAll(node.Children);
         }
-    }
-
-    // ==================== Network share support ====================
-
-    [DllImport("netapi32.dll", CharSet = CharSet.Unicode)]
-    private static extern int NetShareEnum(
-        string serverName, int level, out IntPtr bufPtr, int prefMaxLen,
-        out int entriesRead, out int totalEntries, ref int resumeHandle);
-
-    [DllImport("netapi32.dll")]
-    private static extern int NetApiBufferFree(IntPtr buffer);
-
-    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
-    private struct SHARE_INFO_1
-    {
-        [MarshalAs(UnmanagedType.LPWStr)] public string shi1_netname;
-        public uint shi1_type;
-        [MarshalAs(UnmanagedType.LPWStr)] public string shi1_remark;
-    }
-
-    private static bool IsUncServerPath(string path)
-    {
-        if (!path.StartsWith(@"\\")) return false;
-        var trimmed = path.TrimEnd('\\');
-        var afterPrefix = trimmed[2..];
-        return !afterPrefix.Contains('\\');
     }
 
     private static TreeNode CreateNode(string name, string fullPath)

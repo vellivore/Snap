@@ -2,7 +2,6 @@ using System.Collections.ObjectModel;
 using System.Collections.Specialized;
 using System.Diagnostics;
 using System.IO;
-using System.Runtime.InteropServices;
 using System.Windows;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
@@ -63,6 +62,27 @@ public partial class FilePaneViewModel : ObservableObject
 
     [ObservableProperty]
     private FileItem? _selectedItem;
+
+    /// <summary>Every selected entry in list order (the list view reports it through
+    /// <see cref="SetSelection"/>). Used by commands that do not come from the list, e.g. the palette.</summary>
+    public IReadOnlyList<FileItem> SelectedItems { get; private set; } = [];
+
+    /// <summary>Called by the view whenever the list's selection changes.</summary>
+    public void SetSelection(System.Collections.IList selectedItems) =>
+        SelectedItems = SelectedInListOrder(selectedItems);
+
+    // ==================== Host (#15) ====================
+    // Set by MainViewModel when the tab joins a pane.
+
+    /// <summary>Confirmations and the rename dialog.</summary>
+    public IDialogService? Dialogs { get; set; }
+
+    /// <summary>Called after a file operation with the folders it changed (source and target);
+    /// refreshes every pane showing one of them (MainViewModel.RefreshPanesShowing).</summary>
+    public Func<IReadOnlyList<string>, Task>? FoldersChanged { get; set; }
+
+    /// <summary>The view should select and scroll to this entry (after rename / new folder).</summary>
+    public event Action<FileItem>? RevealRequested;
 
 
     public ObservableCollection<FileItem> Items { get; } = new();
@@ -327,7 +347,7 @@ public partial class FilePaneViewModel : ObservableObject
         if (string.IsNullOrEmpty(path) || path == PcViewPath) return null;
         if (path.StartsWith(@"\\"))
         {
-            if (IsUncServerPath(path)) return null;
+            if (FileSystemService.IsUncServerPath(path)) return null;
             var trimmed = path.TrimEnd('\\');
             var lastSep = trimmed.LastIndexOf('\\');
             return lastSep > 1 ? trimmed[..lastSep] : null;
@@ -337,7 +357,7 @@ public partial class FilePaneViewModel : ObservableObject
 
     /// <summary>Backspace / Alt+Up / double-click on empty space: go to the folder above.</summary>
     [RelayCommand]
-    public async Task GoUp()
+    public async Task GoUpAsync()
     {
         var parent = GetParentPath(CurrentPath);
         if (parent != null)
@@ -497,8 +517,8 @@ public partial class FilePaneViewModel : ObservableObject
 
         var destDir = CurrentPath;
 
-        // PC ビュー（ドライブ一覧）には貼り付けできない
-        if (string.Equals(destDir, PcViewPath, StringComparison.OrdinalIgnoreCase))
+        // PC ビュー（ドライブ一覧）・\\server には貼り付けできない
+        if (!CanCreateHere(destDir))
         {
             StatusMessage = "ここには貼り付けできません";
             return;
@@ -531,13 +551,14 @@ public partial class FilePaneViewModel : ObservableObject
             if (!result.Success && !result.Aborted)
                 Log.Warn("FilePane.Paste", $"{(isCut ? "move" : "copy")} to {destDir} failed: {result.Error}");
 
+            // A move changes the source folders too.
+            await RefreshFoldersAsync(isCut ? paths.Select(FileSystemService.ParentOf).Append(destDir) : [destDir]);
+
             StatusMessage = result.Success
-                ? (isCut ? "移動しました" : "貼り付けました")
+                ? (isCut ? $"{paths.Count} 項目を移動しました" : $"{paths.Count} 項目を貼り付けました")
                 : result.Aborted
                     ? "操作がキャンセルされました"
                     : $"貼り付けエラー: {result.Error}";
-
-            await Refresh();
         }
         finally
         {
@@ -545,8 +566,69 @@ public partial class FilePaneViewModel : ObservableObject
         }
     }
 
+    /// <summary>
+    /// Copies (<paramref name="copy"/>) or moves <paramref name="paths"/> into <paramref name="targetDir"/>
+    /// through the shell, then refreshes every pane showing the target or (for a move) a source
+    /// folder. Used by drag &amp; drop onto this pane and by the palette's /copy to, /move to (#15).
+    /// </summary>
+    public async Task DropFilesAsync(IReadOnlyList<string> paths, string targetDir, bool copy)
+    {
+        if (paths.Count == 0) return;
+
+        if (!CanCreateHere(targetDir))
+        {
+            StatusMessage = "ここにはドロップできません";
+            return;
+        }
+
+        // A folder cannot go into itself or one of its subfolders (the shell would stop with an error).
+        if (paths.Any(p => FileSystemService.IsSameOrUnder(targetDir, p)))
+        {
+            StatusMessage = "フォルダーをそれ自身の中へは送れません";
+            return;
+        }
+
+        // Dropping items onto the folder they are already in does nothing (as before).
+        if (paths.All(p => FileSystemService.SamePath(FileSystemService.ParentOf(p), targetDir)))
+        {
+            StatusMessage = "元と同じフォルダーです";
+            return;
+        }
+
+        IsLoading = true;
+        try
+        {
+            // Shell の IFileOperation で実行（UAC 昇格・進捗・名前衝突ダイアログはシェルに任せる）
+            var result = copy
+                ? await Interop.ShellFileOperation.CopyAsync(paths, targetDir)
+                : await Interop.ShellFileOperation.MoveAsync(paths, targetDir);
+
+            if (!result.Success && !result.Aborted)
+                Log.Warn("FilePane.Drop", $"{(copy ? "copy" : "move")} to {targetDir} failed: {result.Error}");
+
+            await RefreshFoldersAsync(copy ? [targetDir] : paths.Select(FileSystemService.ParentOf).Append(targetDir));
+
+            StatusMessage = result.Success
+                ? (copy ? $"{paths.Count} 項目をコピーしました" : $"{paths.Count} 項目を移動しました")
+                : result.Aborted
+                    ? "操作がキャンセルされました"
+                    : $"{(copy ? "コピー" : "移動")}エラー: {result.Error}";
+        }
+        finally
+        {
+            IsLoading = false;
+        }
+    }
+
+    /// <summary>Delete: to the recycle bin (Snap asks first).</summary>
     [RelayCommand]
-    public async Task DeleteItems(System.Collections.IList? selectedItems)
+    public Task DeleteItems(System.Collections.IList? selectedItems) => DeleteCoreAsync(selectedItems, permanent: false);
+
+    /// <summary>Shift+Delete: deletes for good, without the recycle bin (Snap asks, then the shell asks too).</summary>
+    [RelayCommand]
+    public Task DeleteItemsPermanently(System.Collections.IList? selectedItems) => DeleteCoreAsync(selectedItems, permanent: true);
+
+    private async Task DeleteCoreAsync(System.Collections.IList? selectedItems, bool permanent)
     {
         if (selectedItems == null || selectedItems.Count == 0) return;
 
@@ -555,33 +637,35 @@ public partial class FilePaneViewModel : ObservableObject
             .ToList();
 
         if (items.Count == 0) return;
+        if (Dialogs == null) { Log.Warn("FilePane.Delete", "no dialog service"); return; }
 
         var names = string.Join("\n", items.Select(f => f.Name));
-        var result = MessageBox.Show(
-            $"以下の {items.Count} 項目をごみ箱へ移動しますか？\n\n{names}\n\n※ ごみ箱が使えない場所（ネットワーク等）では完全に削除されます。",
-            "ごみ箱へ移動",
-            MessageBoxButton.YesNo,
-            MessageBoxImage.Warning);
-
-        if (result != MessageBoxResult.Yes) return;
+        var confirmed = permanent
+            ? Dialogs.Confirm(
+                $"以下の {items.Count} 項目を完全に削除しますか（元に戻せません）？\n\n{names}",
+                "完全に削除")
+            : Dialogs.Confirm(
+                $"以下の {items.Count} 項目をごみ箱へ移動しますか？\n\n{names}\n\n※ ごみ箱が使えない場所（ネットワーク等）では完全に削除されます。",
+                "ごみ箱へ移動");
+        if (!confirmed) return;
 
         IsLoading = true;
         try
         {
-            // Shell の IFileOperation で削除（権限が必要な対象は UAC 昇格、ごみ箱へ送る＝元に戻せる）
-            var opResult = await Interop.ShellFileOperation.DeleteAsync(
-                items.Select(i => i.FullPath).ToList());
+            // Shell の IFileOperation で削除（権限が必要な対象は UAC 昇格。通常はごみ箱へ送る＝元に戻せる）
+            var paths = items.Select(i => i.FullPath).ToList();
+            var opResult = await Interop.ShellFileOperation.DeleteAsync(paths, permanent);
 
             if (!opResult.Success && !opResult.Aborted)
-                Log.Warn("FilePane.Delete", $"delete failed: {opResult.Error}");
+                Log.Warn("FilePane.Delete", $"{(permanent ? "permanent " : "")}delete failed: {opResult.Error}");
+
+            await RefreshFoldersAsync(paths.Select(FileSystemService.ParentOf));
 
             StatusMessage = opResult.Success
-                ? $"{items.Count} 項目をごみ箱へ移動しました"
+                ? (permanent ? $"{items.Count} 項目を完全に削除しました" : $"{items.Count} 項目をごみ箱へ移動しました")
                 : opResult.Aborted
                     ? "削除がキャンセルされました"
                     : $"削除エラー: {opResult.Error}";
-
-            await Refresh();
         }
         finally
         {
@@ -589,47 +673,154 @@ public partial class FilePaneViewModel : ObservableObject
         }
     }
 
+    /// <summary>F2: renames through the shell (UAC, undo), then selects the renamed item again.</summary>
     [RelayCommand]
-    public async Task RenameItem(FileItem? item)
+    public Task RenameItem(FileItem? item) => RenameCoreAsync(item);
+
+    private async Task RenameCoreAsync(FileItem? item)
     {
         if (item == null || item.Name == "..") return;
+        var dir = FileSystemService.ParentOf(item.FullPath);
+        // Drives in the PC view and \\server\share have no folder to rename them in.
+        if (dir == null || !CanCreateHere(dir)) return;
+        if (Dialogs == null) { Log.Warn("FilePane.Rename", "no dialog service"); return; }
 
-        // Show rename dialog
-        var dialog = new Views.RenameDialog(item.Name)
+        var newName = Dialogs.AskName(item.Name, isFile: !item.IsDirectory);
+        if (string.IsNullOrWhiteSpace(newName) || newName == item.Name)
         {
-            Owner = Application.Current.MainWindow
-        };
+            RevealPath(item.FullPath);
+            return;
+        }
 
-        if (dialog.ShowDialog() != true) return;
+        var result = await Interop.ShellFileOperation.RenameAsync(item.FullPath, newName);
+        if (!result.Success && !result.Aborted)
+            Log.Warn("FilePane.Rename", $"{item.FullPath} -> {newName}: {result.Error}");
 
-        var newName = dialog.NewName;
-        if (string.IsNullOrWhiteSpace(newName) || newName == item.Name) return;
+        await RefreshFoldersAsync([dir]);
 
+        var newPath = Path.Combine(dir, newName);
+        var renamed = result.Success && (Directory.Exists(newPath) || File.Exists(newPath));
+        RevealPath(renamed ? newPath : item.FullPath);
+
+        StatusMessage = renamed
+            ? $"名前を変更しました: {newName}"
+            : result.Aborted
+                ? "名前の変更がキャンセルされました"
+                : $"名前変更エラー: {result.Error ?? "変更後の項目が見つかりません"}";
+    }
+
+    /// <summary>
+    /// Ctrl+Shift+N: creates "新しいフォルダー" (or "新しいフォルダー (2)" ...) here through the
+    /// shell, selects it and opens the rename dialog right away.
+    /// </summary>
+    public async Task NewFolderAsync()
+    {
+        var dir = CurrentPath;
+        if (!CanCreateHere(dir))
+        {
+            StatusMessage = "ここにはフォルダーを作れません";
+            return;
+        }
+
+        var name = FileSystemService.UniqueName(dir, "新しいフォルダー", isDirectory: true);
+        if (name == null)
+        {
+            StatusMessage = "フォルダー名を決められません";
+            return;
+        }
+
+        var result = await Interop.ShellFileOperation.NewFolderAsync(dir, name);
+        var path = Path.Combine(dir, name);
+        await RefreshFoldersAsync([dir]);
+
+        if (!result.Success || !Directory.Exists(path))
+        {
+            if (!result.Aborted)
+                Log.Warn("FilePane.NewFolder", $"{path}: {result.Error}");
+            StatusMessage = result.Aborted
+                ? "フォルダーの作成がキャンセルされました"
+                : $"フォルダーを作れません: {result.Error ?? "作成後のフォルダーが見つかりません"}";
+            return;
+        }
+
+        var created = FindItem(path);
+        if (created == null)
+        {
+            StatusMessage = $"フォルダーを作成しました: {name}";
+            return;
+        }
+        SelectedItem = created;
+        await RenameCoreAsync(created);
+    }
+
+    /// <summary>
+    /// After a shell context-menu command: refreshes the panes showing this folder, the folders
+    /// of the items the menu was for and the folders of the files on the clipboard (a paste of a
+    /// cut empties those). <paramref name="clipboardFolders"/> is read before the menu runs.
+    /// </summary>
+    public Task RefreshAfterShellCommandAsync(IEnumerable<string>? itemPaths, IEnumerable<string> clipboardFolders)
+    {
+        var folders = (itemPaths ?? []).Select(FileSystemService.ParentOf)
+            .Concat(clipboardFolders)
+            .Append(CurrentPath);
+        return RefreshFoldersAsync(folders);
+    }
+
+    /// <summary>Folders of the files now on the clipboard (for <see cref="RefreshAfterShellCommandAsync"/>).</summary>
+    public static List<string> ClipboardSourceFolders()
+    {
         try
         {
-            var dir = Path.GetDirectoryName(item.FullPath)!;
-            var newPath = Path.Combine(dir, newName);
-
-            await Task.Run(() =>
-            {
-                if (item.IsDirectory)
-                {
-                    Directory.Move(item.FullPath, newPath);
-                }
-                else
-                {
-                    File.Move(item.FullPath, newPath);
-                }
-            });
-
-            StatusMessage = $"名前を変更しました: {newName}";
-            await Refresh();
+            return ReadClipboard().Paths
+                .Select(FileSystemService.ParentOf)
+                .Where(d => d != null)
+                .Select(d => d!)
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList();
         }
         catch (Exception ex)
         {
-            Log.Warn("FilePane.Rename", $"{item.FullPath} -> {newName}", ex);
-            StatusMessage = $"名前変更エラー: {ex.Message}";
+            Log.Warn("FilePane.ShellMenu", "clipboard read failed", ex);
+            return [];
         }
+    }
+
+    /// <summary>
+    /// Refreshes every pane showing one of <paramref name="folders"/> through
+    /// <see cref="FoldersChanged"/> (MainViewModel.RefreshPanesShowing); without a host, just this tab.
+    /// </summary>
+    private async Task RefreshFoldersAsync(IEnumerable<string?> folders)
+    {
+        var list = folders
+            .Where(f => !string.IsNullOrEmpty(f))
+            .Select(f => f!)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+        if (list.Count == 0) return;
+
+        if (FoldersChanged != null)
+            await FoldersChanged(list);
+        else if (list.Any(f => FileSystemService.SamePath(f, CurrentPath)))
+            await Refresh();
+    }
+
+    /// <summary>A real folder that can hold new items (not the PC view, not \\server).</summary>
+    private static bool CanCreateHere(string dir) =>
+        !string.IsNullOrEmpty(dir)
+        && !string.Equals(dir, PcViewPath, StringComparison.OrdinalIgnoreCase)
+        && !FileSystemService.IsUncServerPath(dir);
+
+    /// <summary>The loaded entry for <paramref name="path"/> (also when the filter hides it).</summary>
+    private FileItem? FindItem(string path) =>
+        _allItems.FirstOrDefault(i => FileSystemService.SamePath(i.FullPath, path));
+
+    /// <summary>Selects the entry for <paramref name="path"/> and asks the view to scroll to it.</summary>
+    private void RevealPath(string path)
+    {
+        var item = Items.FirstOrDefault(i => FileSystemService.SamePath(i.FullPath, path));
+        if (item == null) return;
+        SelectedItem = item;
+        RevealRequested?.Invoke(item);
     }
 
     /// <summary>
@@ -698,43 +889,20 @@ public partial class FilePaneViewModel : ObservableObject
     private static LoadResult LoadDrives()
     {
         var items = new List<FileItem>();
-        int skipped = 0;
-        foreach (var drive in DriveInfo.GetDrives())
+        var drives = FileSystemService.GetDrives(out var skipped);
+        foreach (var drive in drives)
         {
-            try
+            var (icon, _) = IconHelper.GetIconAndType(drive.RootPath, true);
+            items.Add(new FileItem
             {
-                var label = drive.IsReady && !string.IsNullOrEmpty(drive.VolumeLabel)
-                    ? $"{drive.VolumeLabel} ({drive.Name.TrimEnd('\\')})"
-                    : $"{drive.Name.TrimEnd('\\')}";
-                var driveType = drive.DriveType switch
-                {
-                    DriveType.Fixed => "ローカル ディスク",
-                    DriveType.Removable => "リムーバブル ディスク",
-                    DriveType.Network => "ネットワーク ドライブ",
-                    DriveType.CDRom => "CD/DVD ドライブ",
-                    DriveType.Ram => "RAM ディスク",
-                    _ => "ドライブ",
-                };
-                var size = drive.IsReady ? drive.TotalSize : 0;
-                var (icon, _) = Helpers.IconHelper.GetIconAndType(drive.Name, true);
-
-                items.Add(new FileItem
-                {
-                    Name = label,
-                    FullPath = drive.Name,
-                    LastModified = DateTime.MinValue,
-                    Size = size,
-                    IsDirectory = true,
-                    Type = driveType,
-                    Icon = icon,
-                });
-            }
-            catch (Exception ex)
-            {
-                // Skip inaccessible drives
-                skipped++;
-                Log.Warn("FilePane.LoadDrives", drive.Name, ex);
-            }
+                Name = drive.Label,
+                FullPath = drive.RootPath,
+                LastModified = DateTime.MinValue,
+                Size = drive.TotalSize,
+                IsDirectory = true,
+                Type = drive.TypeName,
+                Icon = icon,
+            });
         }
         return new LoadResult(items, skipped);
     }
@@ -751,8 +919,8 @@ public partial class FilePaneViewModel : ObservableObject
         Exception? firstSkip = null;
 
         // UNC server path (\\server) — enumerate network shares via NetShareEnum
-        if (IsUncServerPath(path))
-            return new LoadResult(EnumerateNetworkShares(path), 0);
+        if (FileSystemService.IsUncServerPath(path))
+            return new LoadResult(LoadShares(path), 0);
 
         var dirInfo = new DirectoryInfo(path);
 
@@ -812,99 +980,28 @@ public partial class FilePaneViewModel : ObservableObject
         return new LoadResult(items, skipped);
     }
 
-    // ==================== Network share enumeration ====================
-
-    [DllImport("netapi32.dll", CharSet = CharSet.Unicode)]
-    private static extern int NetShareEnum(
-        string serverName, int level, out IntPtr bufPtr, int prefMaxLen,
-        out int entriesRead, out int totalEntries, ref int resumeHandle);
-
-    [DllImport("netapi32.dll")]
-    private static extern int NetApiBufferFree(IntPtr buffer);
-
-    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
-    private struct SHARE_INFO_1
-    {
-        [MarshalAs(UnmanagedType.LPWStr)] public string shi1_netname;
-        public uint shi1_type;
-        [MarshalAs(UnmanagedType.LPWStr)] public string shi1_remark;
-    }
-
-    private const uint STYPE_DISKTREE = 0x00000000;
-    private const uint STYPE_SPECIAL = 0x80000000;
-
-    private static List<FileItem> EnumerateNetworkShares(string serverPath)
+    /// <summary>The shares of \\server as folder entries (enumeration failure is thrown).</summary>
+    private static List<FileItem> LoadShares(string serverPath)
     {
         var items = new List<FileItem>();
-        var server = serverPath.TrimEnd('\\');
-        int resumeHandle = 0;
-
-        int result = NetShareEnum(server, 1, out var bufPtr, -1,
-            out int entriesRead, out _, ref resumeHandle);
-
-        if (result != 0 || bufPtr == IntPtr.Zero)
-            throw new DirectoryNotFoundException($"ネットワーク共有を列挙できません: {server} (エラーコード: {result})");
-
-        try
+        foreach (var share in FileSystemService.GetShares(serverPath))
         {
-            var structSize = Marshal.SizeOf<SHARE_INFO_1>();
-            var currentPtr = bufPtr;
-
-            for (int i = 0; i < entriesRead; i++)
+            try
             {
-                var shareInfo = Marshal.PtrToStructure<SHARE_INFO_1>(currentPtr);
-                currentPtr = IntPtr.Add(currentPtr, structSize);
-
-                // Skip hidden shares (ending with $) and non-disk shares
-                if (shareInfo.shi1_netname.EndsWith('$')) continue;
-                if ((shareInfo.shi1_type & ~STYPE_SPECIAL) != STYPE_DISKTREE) continue;
-
-                var sharePath = $"{server}\\{shareInfo.shi1_netname}";
-                try
+                var (icon, _) = IconHelper.GetIconAndType(share.FullPath, true);
+                items.Add(new FileItem
                 {
-                    var (icon, typeName) = IconHelper.GetIconAndType(sharePath, true);
-                    items.Add(new FileItem
-                    {
-                        Name = shareInfo.shi1_netname,
-                        FullPath = sharePath,
-                        LastModified = DateTime.MinValue,
-                        IsDirectory = true,
-                        Type = string.IsNullOrEmpty(shareInfo.shi1_remark) ? "ネットワーク共有" : shareInfo.shi1_remark,
-                        Icon = icon,
-                    });
-                }
-                catch (Exception ex) { Log.Warn("FilePane.NetShares", sharePath, ex); }
+                    Name = share.Name,
+                    FullPath = share.FullPath,
+                    LastModified = DateTime.MinValue,
+                    IsDirectory = true,
+                    Type = string.IsNullOrEmpty(share.Remark) ? "ネットワーク共有" : share.Remark,
+                    Icon = icon,
+                });
             }
+            catch (Exception ex) { Log.Warn("FilePane.NetShares", share.FullPath, ex); }
         }
-        finally
-        {
-            NetApiBufferFree(bufPtr);
-        }
-
         return items;
-    }
-
-    /// <summary>UNC server path (\\server) without share name</summary>
-    private static bool IsUncServerPath(string path)
-    {
-        if (!path.StartsWith(@"\\")) return false;
-        var trimmed = path.TrimEnd('\\');
-        // \\server has no additional backslash after the server name
-        var afterPrefix = trimmed[2..];
-        return !afterPrefix.Contains('\\');
-    }
-
-    private static string? GetUncParent(string uncPath)
-    {
-        var trimmed = uncPath.TrimEnd('\\');
-        var lastSep = trimmed.LastIndexOf('\\');
-        if (lastSep <= 1) return null;
-
-        var parent = trimmed[..lastSep];
-        var parts = parent.Split('\\', StringSplitOptions.RemoveEmptyEntries);
-        if (parts.Length < 2) return null;
-
-        return parent;
     }
 
     public void SortByColumn(string column)

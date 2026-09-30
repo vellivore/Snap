@@ -18,7 +18,7 @@ namespace Snap;
 
 public partial class MainWindow : Window
 {
-    private readonly MainViewModel _viewModel = new();
+    private readonly MainViewModel _viewModel = new(new WpfDialogService());
     private PerformanceCounter? _cpuCounter;
     private DispatcherTimer? _statusTimer;
     private DispatcherTimer? _usageSaveTimer;
@@ -263,7 +263,6 @@ public partial class MainWindow : Window
         AddHandler(FilePaneControl.AddBookmarkRequestedEvent, new RoutedEventHandler(OnAddBookmarkRequested));
         // Views ask MainViewModel for cross-pane work through routed events (#13).
         AddHandler(TabPaneControl.TabMoveRequestedEvent, new RoutedEventHandler(OnTabMoveRequested));
-        AddHandler(FilePaneControl.RefreshPanesRequestedEvent, new RoutedEventHandler(OnRefreshPanesRequested));
         AddHandler(FilePaneControl.OpenInNewTabRequestedEvent, new RoutedEventHandler(OnOpenInNewTabRequested));
 
         InitStatusTimer();
@@ -634,13 +633,6 @@ public partial class MainWindow : Window
             args.Moved = _viewModel.MoveTab(args.Tab, args.Target);
     }
 
-    private void OnRefreshPanesRequested(object sender, RoutedEventArgs e)
-    {
-        if (e is RefreshPanesRequestedEventArgs args)
-            _viewModel.RefreshPanesShowing(args.Folders, args.Except)
-                .SafeFireAndForget("MainWindow.RefreshPanes", "他のペインを更新できません");
-    }
-
     private void OnUserFacingError(string message)
     {
         void Show() => _viewModel.ShowStatus(message);
@@ -688,10 +680,6 @@ public partial class MainWindow : Window
                 return;
             }
         }
-    }
-
-    private void Window_PreviewKeyUp(object sender, KeyEventArgs e)
-    {
     }
 
     // ==================== Command Palette ====================

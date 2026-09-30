@@ -46,9 +46,28 @@ public partial class MainViewModel : ObservableObject
     private readonly DispatcherTimer _todayTimer;
     private string? _pendingTodayPath;
 
-    public MainViewModel()
+    /// <summary>Confirmations and the rename dialog, handed to every tab (#15).</summary>
+    public IDialogService Dialogs { get; }
+
+    /// <summary>Pane names used by the palette (/copy to 左上 ...), in <see cref="AllPanes"/> order.</summary>
+    private static readonly string[] PaneNames = ["左上", "右上", "左下", "右下"];
+
+    public MainViewModel(IDialogService dialogs)
     {
+        Dialogs = dialogs;
         AllPanes = [TopLeftPane, TopRightPane, BottomLeftPane, BottomRightPane];
+
+        // Every tab that joins a pane (startup, new tab, moved tab) gets the dialogs and reports
+        // the folders its file operations changed, so all panes showing them refresh (#15).
+        foreach (var pane in AllPanes)
+        {
+            foreach (var tab in pane.Tabs) AttachTab(tab);
+            pane.Tabs.CollectionChanged += (_, e) =>
+            {
+                if (e.NewItems != null)
+                    foreach (FilePaneViewModel tab in e.NewItems) AttachTab(tab);
+            };
+        }
 
         CommandPalette.NavigateAction = NavigateActiveTabAsync;
         CommandPalette.Commands = BuildPaletteCommands();
@@ -103,6 +122,12 @@ public partial class MainViewModel : ObservableObject
         if (ActiveTab != null)
             FolderTree.SyncToPathAsync(ActiveTab.CurrentPath).SafeFireAndForget("Main.TreeSync", "ツリーを同期できません");
         WatchPersistedState();
+    }
+
+    private void AttachTab(FilePaneViewModel tab)
+    {
+        tab.Dialogs = Dialogs;
+        tab.FoldersChanged = folders => RefreshPanesShowing(folders);
     }
 
     // ==================== Settings persistence (#12) ====================
@@ -277,7 +302,7 @@ public partial class MainViewModel : ObservableObject
         {
             var tab = pane.SelectedTab;
             if (tab == null || tab == except) continue;
-            if (list.Any(f => string.Equals(f, tab.CurrentPath, StringComparison.OrdinalIgnoreCase)))
+            if (list.Any(f => FileSystemService.SamePath(f, tab.CurrentPath)))
                 await tab.Refresh();
         }
     }
@@ -331,7 +356,7 @@ public partial class MainViewModel : ObservableObject
     private Task GoForward() => ActiveTab?.GoForward() ?? Task.CompletedTask;
 
     [RelayCommand]
-    private Task GoUp() => ActiveTab?.GoUp() ?? Task.CompletedTask;
+    private Task GoUp() => ActiveTab?.GoUpAsync() ?? Task.CompletedTask;
 
     /// <summary>
     /// Opens <paramref name="path"/> in a new tab of the pane holding <paramref name="from"/>,
@@ -347,6 +372,43 @@ public partial class MainViewModel : ObservableObject
 
     /// <summary>The palette's app commands. Adding a command = adding one entry here.</summary>
     private IReadOnlyList<PaletteCommand> BuildPaletteCommands() =>
+    [
+        .. BuildBaseCommands(),
+        // /copy to <pane>, /move to <pane> (#15): the active tab's selection into another pane's folder.
+        .. PaneNames.Select((name, i) => new PaletteCommand(
+            $"copy to {name}", $"Copy to {name}", "\uE8C8", () => SendSelectionToAsync(AllPanes[i], copy: true))),
+        .. PaneNames.Select((name, i) => new PaletteCommand(
+            $"move to {name}", $"Move to {name}", "\uE8DE", () => SendSelectionToAsync(AllPanes[i], copy: false))),
+    ];
+
+    /// <summary>
+    /// Copies / moves the active tab's selected items into the folder shown by
+    /// <paramref name="target"/>'s selected tab (#15).
+    /// </summary>
+    private async Task SendSelectionToAsync(TabPaneViewModel target, bool copy)
+    {
+        var source = ActiveTab;
+        if (source == null) return;
+
+        if (target == CurrentPane)
+        {
+            source.StatusMessage = "送り先に同じペインは選べません";
+            return;
+        }
+        var targetDir = target.SelectedTab?.CurrentPath;
+        if (string.IsNullOrEmpty(targetDir))
+            return;
+
+        var paths = source.SelectedItems.Select(i => i.FullPath).ToList();
+        if (paths.Count == 0)
+        {
+            source.StatusMessage = "項目が選択されていません";
+            return;
+        }
+        await source.DropFilesAsync(paths, targetDir, copy);
+    }
+
+    private IReadOnlyList<PaletteCommand> BuildBaseCommands() =>
     [
         new("new tab", "New Tab", "\uE710", () => CurrentPane.AddTab(null)),
         new("close tab", "Close Tab", "\uE711", () =>

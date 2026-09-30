@@ -5,7 +5,6 @@
              xmlns:converters="clr-namespace:Snap.Converters"
              StartupUri="MainWindow.xaml">
     <Application.Resources>
-        <converters:EqualityConverter x:Key="EqualityConverter"/>
         <converters:FrequencyLevelToBrushConverter x:Key="FrequencyLevelToBrushConverter"/>
 
         <!-- Color Palette -->

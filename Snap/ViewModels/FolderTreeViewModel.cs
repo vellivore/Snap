@@ -449,23 +449,30 @@ public partial class FolderTreeViewModel : ObservableObject
     // --- ブックマーク管理 ---
 
     /// <summary>
-    /// settings.json から読み込んだブックマークパスを復元する。
+    /// settings.json から読み込んだブックマーク（パス＋表示名）を復元する。
+    /// 表示名が無い（v1.4.2 までの文字列形式）ときはフォルダ名から作る。
     /// UIスレッドで呼ぶこと（アイコン取得のため）。
     /// </summary>
-    public void LoadBookmarks(List<string> paths)
+    public void LoadBookmarks(List<PathEntry> entries)
     {
         Bookmarks.Clear();
-        foreach (var path in paths)
+        foreach (var entry in entries)
         {
+            var path = entry?.Path;
             // Drop sentinel entries saved by older versions ("::PC" / "::\PC").
             if (!string.IsNullOrWhiteSpace(path) && !path.StartsWith("::"))
             {
-                var name = Path.GetFileName(path.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
-                if (string.IsNullOrEmpty(name)) name = path; // ドライブルートの場合
+                var name = string.IsNullOrWhiteSpace(entry!.Name) ? DefaultBookmarkName(path) : entry.Name;
                 var (icon, _) = IconHelper.GetIconAndType(path, true);
                 Bookmarks.Add(new BookmarkItem { Name = name, FullPath = path, Icon = icon });
             }
         }
+    }
+
+    private static string DefaultBookmarkName(string path)
+    {
+        var name = Path.GetFileName(path.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
+        return string.IsNullOrEmpty(name) ? path : name; // ドライブルートの場合はパスそのもの
     }
 
     /// <summary>
@@ -487,8 +494,7 @@ public partial class FolderTreeViewModel : ObservableObject
                 return; // 既に登録済み
         }
 
-        var name = Path.GetFileName(normalized.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
-        if (string.IsNullOrEmpty(name)) name = normalized;
+        var name = DefaultBookmarkName(normalized);
         var (icon, _) = IconHelper.GetIconAndType(normalized, true);
         Bookmarks.Add(new BookmarkItem { Name = name, FullPath = normalized, Icon = icon });
     }
@@ -510,13 +516,8 @@ public partial class FolderTreeViewModel : ObservableObject
     }
 
     /// <summary>
-    /// 保存用にブックマークパスのリストを返す。
+    /// 保存用にブックマーク（パス＋表示名）のリストを返す。
     /// </summary>
-    public List<string> GetBookmarkPaths()
-    {
-        var list = new List<string>();
-        foreach (var bm in Bookmarks)
-            list.Add(bm.FullPath);
-        return list;
-    }
+    public List<PathEntry> GetBookmarks() =>
+        Bookmarks.Select(bm => new PathEntry(bm.FullPath, bm.Name)).ToList();
 }

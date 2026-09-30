@@ -35,7 +35,31 @@ public partial class FilePaneViewModel : ObservableObject
     private string _tabHeader = "新しいタブ";
 
     /// <summary>True when user has set a custom tab name (not auto-generated from path).</summary>
-    public bool HasCustomTabHeader { get; set; }
+    public bool HasCustomTabHeader { get; private set; }
+
+    /// <summary>The automatic tab name for <paramref name="path"/> (folder name, drive root, or "PC").</summary>
+    public static string DefaultTabHeader(string path)
+    {
+        if (string.Equals(path, PcViewPath, StringComparison.OrdinalIgnoreCase))
+            return "PC";
+        return Path.GetFileName(path.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar))
+            is { Length: > 0 } name ? name : path;
+    }
+
+    /// <summary>Gives the tab a user-chosen name that survives refreshes (until the folder changes).</summary>
+    public void SetCustomTabHeader(string name)
+    {
+        if (string.IsNullOrWhiteSpace(name)) return;
+        HasCustomTabHeader = true;
+        TabHeader = name;
+    }
+
+    /// <summary>Drops the user-chosen name and shows the automatic one again.</summary>
+    public void ResetTabHeader()
+    {
+        HasCustomTabHeader = false;
+        TabHeader = DefaultTabHeader(CurrentPath);
+    }
 
     [ObservableProperty]
     private FileItem? _selectedItem;
@@ -167,14 +191,12 @@ public partial class FilePaneViewModel : ObservableObject
             {
                 _allItems = items;
                 ApplySortToItems();
+                // A custom tab name is kept across refreshes / paste / delete (same folder)
+                // and reset only when the tab moves to a different folder (#12).
+                var pathChanged = !string.Equals(CurrentPath, path, StringComparison.OrdinalIgnoreCase);
                 CurrentPath = path;
-                // Reset custom tab name when navigating to a different directory
-                if (HasCustomTabHeader)
-                    HasCustomTabHeader = false;
-
-                TabHeader = isPcView ? "PC"
-                    : Path.GetFileName(path.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar))
-                            is { Length: > 0 } name ? name : path;
+                if (pathChanged || !HasCustomTabHeader)
+                    ResetTabHeader();
                 StatusMessage = load.Skipped > 0
                     ? $"{Items.Count} 項目（読めない項目 {load.Skipped} 件を省略）"
                     : $"{Items.Count} 項目";

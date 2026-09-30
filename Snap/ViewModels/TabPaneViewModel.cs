@@ -1,6 +1,7 @@
 using System.Collections.ObjectModel;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
+using Snap.Models;
 using Snap.Services;
 
 namespace Snap.ViewModels;
@@ -24,18 +25,24 @@ public partial class TabPaneViewModel : ObservableObject
 
     public async Task InitializeAsync()
     {
-        await InitializeAsync([@"C:\"], 0);
+        await InitializeAsync([new PathEntry(@"C:\")], 0);
     }
 
-    public async Task InitializeAsync(List<string> paths, int activeIndex)
+    public async Task InitializeAsync(List<PathEntry> entries, int activeIndex)
     {
-        if (paths.Count == 0)
-            paths = [@"C:\"];
+        entries = entries.Where(e => e != null && !string.IsNullOrWhiteSpace(e.Path)).ToList();
+        if (entries.Count == 0)
+            entries = [new PathEntry(@"C:\")];
 
         var tasks = new List<Task>();
-        foreach (var path in paths)
+        foreach (var entry in entries)
         {
-            var tab = new FilePaneViewModel(path);
+            var tab = new FilePaneViewModel(entry.Path);
+            // Restore a user-chosen tab name, but only if the tab really opens that folder
+            // (a vanished folder falls back to C:\ and must not carry the old name).
+            if (!string.IsNullOrWhiteSpace(entry.Name)
+                && string.Equals(tab.CurrentPath, entry.Path, StringComparison.OrdinalIgnoreCase))
+                tab.SetCustomTabHeader(entry.Name);
             if (_usageTracker != null) tab.SetUsageTracker(_usageTracker);
             Tabs.Add(tab);
             tasks.Add(tab.InitializeAsync());
@@ -48,12 +55,14 @@ public partial class TabPaneViewModel : ObservableObject
         await Task.WhenAll(tasks);
     }
 
-    /// <summary>Returns tab paths and active index for settings persistence.</summary>
-    public (List<string> Paths, int ActiveIndex) GetTabState()
+    /// <summary>Returns tabs ({path, custom name}) and active index for settings persistence.</summary>
+    public (List<PathEntry> Tabs, int ActiveIndex) GetTabState()
     {
-        var paths = Tabs.Select(t => t.CurrentPath).ToList();
+        var tabs = Tabs
+            .Select(t => new PathEntry(t.CurrentPath, t.HasCustomTabHeader ? t.TabHeader : null))
+            .ToList();
         var index = SelectedTab != null ? Tabs.IndexOf(SelectedTab) : 0;
-        return (paths, Math.Max(index, 0));
+        return (tabs, Math.Max(index, 0));
     }
 
     [RelayCommand]

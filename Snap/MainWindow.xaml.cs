@@ -191,12 +191,14 @@ public partial class MainWindow : Window
 
     private async void MainWindow_Loaded(object sender, RoutedEventArgs e)
     {
-        _settings = SettingsService.Load();
+        _settings = SettingsStore.Load();
+        SettingsStore.Capture = CaptureSettings;
         RestoreWindowState(_settings);
-        await _viewModel.InitializeAsync(_settings);
 
-        // ブックマーク復元
+        // ブックマーク復元（初期化の await より前に。途中で閉じても空で上書きしない）
         _viewModel.FolderTree.LoadBookmarks(_settings.Bookmarks);
+
+        await _viewModel.InitializeAsync(_settings);
 
         // ブックマーク追加のルーティドイベントをキャッチ
         AddHandler(FilePaneControl.AddBookmarkRequestedEvent, new RoutedEventHandler(OnAddBookmarkRequested));
@@ -225,6 +227,21 @@ public partial class MainWindow : Window
             }
             catch (Exception ex) { Log.Warn("MainWindow.WarmUp", "shell menu warm-up not started", ex); }
         });
+
+        // Layout changes go to settings.json via the debounced store (#12).
+        LocationChanged += (_, _) => SettingsStore.MarkDirty();
+        SizeChanged += (_, _) => SettingsStore.MarkDirty();
+        StateChanged += (_, _) => SettingsStore.MarkDirty();
+        AddHandler(System.Windows.Controls.Primitives.Thumb.DragCompletedEvent,
+            new System.Windows.Controls.Primitives.DragCompletedEventHandler((_, _) => SettingsStore.MarkDirty()),
+            handledEventsToo: true);
+
+        // Everything is restored: from here on changes are saved.
+        SettingsStore.Ready = true;
+
+        // Tab initialization overwrote the status bar; show the load failure again.
+        if (SettingsStore.LoadError is { } loadError)
+            StatusBarText.Text = loadError;
     }
 
     private void RestoreWindowState(AppSettings settings)
@@ -340,7 +357,8 @@ public partial class MainWindow : Window
         {
             UninstallKeyboardHook();
             _viewModel.Terminal.Dispose();
-            SaveSettings();
+            _viewModel.UsageTracker.Save();
+            SettingsStore.FlushNow();
         }
         catch (Exception ex)
         {
@@ -349,19 +367,21 @@ public partial class MainWindow : Window
         }
     }
 
-    private void SaveSettings()
+    /// <summary>Builds the settings snapshot saved by <see cref="SettingsStore"/>.</summary>
+    private AppSettings CaptureSettings()
     {
-        _viewModel.UsageTracker.Save();
         var settings = new AppSettings();
 
-        // Window state — capture RestoreBounds when maximized
+        // Window state — capture RestoreBounds when maximized or minimized
+        // (a minimized window reports Left/Top = -32000; saves now also happen while minimized).
         var isMax = WindowState == WindowState.Maximized;
+        var useRestore = WindowState != WindowState.Normal && !RestoreBounds.IsEmpty;
         settings.Window = new WindowSettings
         {
-            Width = isMax ? RestoreBounds.Width : Width,
-            Height = isMax ? RestoreBounds.Height : Height,
-            Left = isMax ? RestoreBounds.Left : Left,
-            Top = isMax ? RestoreBounds.Top : Top,
+            Width = useRestore ? RestoreBounds.Width : Width,
+            Height = useRestore ? RestoreBounds.Height : Height,
+            Left = useRestore ? RestoreBounds.Left : Left,
+            Top = useRestore ? RestoreBounds.Top : Top,
             IsMaximized = isMax,
         };
 
@@ -384,12 +404,12 @@ public partial class MainWindow : Window
         settings.Panes = _viewModel.GetPanesState();
 
         // Bookmarks
-        settings.Bookmarks = _viewModel.FolderTree.GetBookmarkPaths();
+        settings.Bookmarks = _viewModel.FolderTree.GetBookmarks();
 
         // Sidebar state
         settings.TodayFolders = _viewModel.Sidebar.GetTodayPaths();
 
-        SettingsService.Save(settings);
+        return settings;
     }
 
     private void InitStatusTimer()
@@ -630,9 +650,7 @@ public partial class MainWindow : Window
 
         cp.OpenSettingsAction = () =>
         {
-            var settingsPath = System.IO.Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
-                "Snap", "settings.json");
+            var settingsPath = SettingsStore.SettingsPath;
             try
             {
                 Process.Start(new ProcessStartInfo(settingsPath) { UseShellExecute = true });

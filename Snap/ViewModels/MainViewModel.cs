@@ -1,3 +1,4 @@
+using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.Windows.Threading;
 using CommunityToolkit.Mvvm.ComponentModel;
@@ -77,6 +78,55 @@ public partial class MainViewModel : ObservableObject
 
         FolderTree.FolderSelected += OnTreeFolderSelected;
         TrackActivePane();
+        WatchPersistedState();
+    }
+
+    // ==================== Settings persistence (#12) ====================
+
+    /// <summary>
+    /// Calls <see cref="SettingsStore.MarkDirty"/> whenever something that goes into
+    /// settings.json changes: tabs (open/close/move/select, folder, custom name),
+    /// bookmarks (add/remove/reorder/rename) and the Today list.
+    /// </summary>
+    private void WatchPersistedState()
+    {
+        foreach (var pane in AllPanes)
+        {
+            pane.PropertyChanged += (_, e) =>
+            {
+                if (e.PropertyName == nameof(TabPaneViewModel.SelectedTab)) SettingsStore.MarkDirty();
+            };
+            WatchCollection(pane.Tabs,
+                nameof(FilePaneViewModel.CurrentPath), nameof(FilePaneViewModel.TabHeader));
+        }
+        WatchCollection(FolderTree.Bookmarks, nameof(BookmarkItem.Name), nameof(BookmarkItem.FullPath));
+        WatchCollection(Sidebar.TodayItems);
+    }
+
+    /// <summary>Marks settings dirty on any change to <paramref name="items"/> and, for the
+    /// listed property names, on property changes of the items they contain.</summary>
+    private static void WatchCollection<T>(ObservableCollection<T> items, params string[] itemProperties)
+        where T : INotifyPropertyChanged
+    {
+        void OnItemChanged(object? sender, PropertyChangedEventArgs e)
+        {
+            if (itemProperties.Contains(e.PropertyName)) SettingsStore.MarkDirty();
+        }
+
+        if (itemProperties.Length > 0)
+            foreach (var item in items) item.PropertyChanged += OnItemChanged;
+
+        items.CollectionChanged += (_, e) =>
+        {
+            if (itemProperties.Length > 0)
+            {
+                if (e.OldItems != null)
+                    foreach (T item in e.OldItems) item.PropertyChanged -= OnItemChanged;
+                if (e.NewItems != null)
+                    foreach (T item in e.NewItems) item.PropertyChanged += OnItemChanged;
+            }
+            SettingsStore.MarkDirty();
+        };
     }
 
     private TabPaneViewModel[] AllPanes => [TopLeftPane, TopRightPane, BottomLeftPane, BottomRightPane];
@@ -86,8 +136,8 @@ public partial class MainViewModel : ObservableObject
     {
         static PaneSettings Capture(TabPaneViewModel pane)
         {
-            var (paths, index) = pane.GetTabState();
-            return new PaneSettings { Tabs = paths, ActiveTabIndex = index };
+            var (tabs, index) = pane.GetTabState();
+            return new PaneSettings { Tabs = tabs, ActiveTabIndex = index };
         }
 
         return new PanesSettings

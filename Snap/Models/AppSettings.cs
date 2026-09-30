@@ -7,7 +7,8 @@ public class AppSettings
     public double[] HorizontalSplit { get; set; } = [1, 1];
     public double[] VerticalSplit { get; set; } = [1, 1];
     public PanesSettings Panes { get; set; } = new();
-    public List<string> Bookmarks { get; set; } = new();
+    /// <summary>Pinned folders. Name is the display name (renamable in the sidebar).</summary>
+    public List<PathEntry> Bookmarks { get; set; } = new();
     public List<string> TodayFolders { get; set; } = new();
 }
 
@@ -30,6 +31,7 @@ public class PanesSettings
 
 public class PaneSettings
 {
-    public List<string> Tabs { get; set; } = [@"C:\"];
+    /// <summary>Open tabs. Name is set only for a user-renamed tab.</summary>
+    public List<PathEntry> Tabs { get; set; } = [new PathEntry(@"C:\")];
     public int ActiveTabIndex { get; set; }
 }

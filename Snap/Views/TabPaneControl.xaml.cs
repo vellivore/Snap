@@ -314,8 +314,7 @@ public partial class TabPaneControl : UserControl
             };
             if (dialog.ShowDialog() == true && !string.IsNullOrWhiteSpace(dialog.NewName))
             {
-                tab.TabHeader = dialog.NewName;
-                tab.HasCustomTabHeader = true;
+                tab.SetCustomTabHeader(dialog.NewName);
             }
         };
         menu.Items.Add(renameItem);
@@ -326,22 +325,7 @@ public partial class TabPaneControl : UserControl
             Foreground = new SolidColorBrush(Color.FromRgb(0xE0, 0xE0, 0xE0)),
             IsEnabled = tab.HasCustomTabHeader,
         };
-        resetItem.Click += (_, _) =>
-        {
-            tab.HasCustomTabHeader = false;
-            // Regenerate name from current path
-            var path = tab.CurrentPath;
-            if (path == FilePaneViewModel.PcViewPath)
-            {
-                tab.TabHeader = "PC";
-            }
-            else
-            {
-                tab.TabHeader = System.IO.Path.GetFileName(
-                    path.TrimEnd(System.IO.Path.DirectorySeparatorChar, System.IO.Path.AltDirectorySeparatorChar))
-                    is { Length: > 0 } name ? name : path;
-            }
-        };
+        resetItem.Click += (_, _) => tab.ResetTabHeader();
         menu.Items.Add(resetItem);
 
         menu.PlacementTarget = border;

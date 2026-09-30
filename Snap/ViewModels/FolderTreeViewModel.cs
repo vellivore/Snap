@@ -4,6 +4,7 @@ using System.Runtime.InteropServices;
 using CommunityToolkit.Mvvm.ComponentModel;
 using Snap.Helpers;
 using Snap.Models;
+using Snap.Services;
 
 namespace Snap.ViewModels;
 
@@ -61,9 +62,10 @@ public partial class FolderTreeViewModel : ObservableObject
                     var driveNode = CreateNode(label, drive.Name);
                     pcNode.Children.Add(driveNode);
                 }
-                catch
+                catch (Exception ex)
                 {
                     // ドライブ情報取得失敗は無視
+                    Log.Warn("FolderTree.Drives", drive.Name, ex);
                 }
             }
             roots.Add(pcNode);
@@ -130,8 +132,12 @@ public partial class FolderTreeViewModel : ObservableObject
                         }
                         finally { NetApiBufferFree(bufPtr); }
                     }
+                    else
+                    {
+                        Log.Warn("FolderTree.Expand", $"NetShareEnum {node.FullPath} returned {result}");
+                    }
                 }
-                catch { }
+                catch (Exception ex) { Log.Warn("FolderTree.Expand", $"share enumeration failed: {node.FullPath}", ex); }
                 return list;
             }
 
@@ -153,15 +159,17 @@ public partial class FolderTreeViewModel : ObservableObject
 
                         list.Add(CreateNode(name, dir));
                     }
-                    catch
+                    catch (Exception ex)
                     {
                         // アクセス拒否等は無視
+                        Log.Warn("FolderTree.Expand", $"skip: {dir}", ex);
                     }
                 }
             }
-            catch
+            catch (Exception ex)
             {
                 // 親ディレクトリのアクセス拒否等
+                Log.Warn("FolderTree.Expand", $"enumeration failed: {node.FullPath}", ex);
             }
             return list;
         });
@@ -326,9 +334,10 @@ public partial class FolderTreeViewModel : ObservableObject
             DeselectAll(RootNodes);
             current.IsSelected = true;
         }
-        catch
+        catch (Exception ex)
         {
             // パス追跡失敗は無視
+            Log.Warn("FolderTree.Sync", path, ex);
         }
         finally
         {
@@ -387,7 +396,7 @@ public partial class FolderTreeViewModel : ObservableObject
             DeselectAll(RootNodes);
             current.IsSelected = true;
         }
-        catch { }
+        catch (Exception ex) { Log.Warn("FolderTree.SyncUnc", path, ex); }
         finally
         {
             IsSyncing = false;

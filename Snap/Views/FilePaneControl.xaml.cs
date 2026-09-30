@@ -9,6 +9,7 @@ using System.Windows.Media;
 using Snap.Helpers;
 using Snap.Interop;
 using Snap.Models;
+using Snap.Services;
 using Snap.ViewModels;
 using System.Linq;
 
@@ -199,7 +200,8 @@ public partial class FilePaneControl : UserControl
                 ImageSource? segIcon = null;
                 if (parts[i].fullPath != FilePaneViewModel.PcViewPath)
                 {
-                    try { (segIcon, _) = IconHelper.GetIconAndType(parts[i].fullPath, true); } catch { }
+                    try { (segIcon, _) = IconHelper.GetIconAndType(parts[i].fullPath, true); }
+                    catch (Exception ex) { Log.Warn("FilePane.BreadcrumbIcon", parts[i].fullPath, ex); }
                 }
                 if (segIcon != null)
                 {
@@ -245,9 +247,10 @@ public partial class FilePaneControl : UserControl
                 BreadcrumbBar.Items.Add(btn);
             }
         }
-        catch
+        catch (Exception ex)
         {
             // パース失敗時はパスをそのまま表示
+            Log.Warn("FilePane.Breadcrumb", path, ex);
             var text = new TextBlock
             {
                 Text = path,
@@ -580,9 +583,10 @@ public partial class FilePaneControl : UserControl
                 await ShellContextMenu.ShowBackgroundMenuAsync(hwnd, folderPath!, x, y,
                     onRefresh: onRefresh, customItems: customItems, onMenuReady: onMenuReady);
         }
-        catch (Exception)
+        catch (Exception ex)
         {
             // async void: never let an exception escape to the dispatcher
+            Log.UserError("FilePane.ContextMenu", "メニューを表示できません", ex);
         }
         finally
         {
@@ -596,7 +600,7 @@ public partial class FilePaneControl : UserControl
                     foreach (var pane in panes) pane.SetAllowDrop(true);
                 });
             }
-            catch { }
+            catch (Exception ex) { Log.Warn("FilePane.ContextMenu", "restore after menu failed", ex); }
             _menuBusy = false;
         }
     }
@@ -792,6 +796,9 @@ public partial class FilePaneControl : UserControl
                 ? await ShellFileOperation.CopyAsync(sourcePaths, targetFolder)
                 : await ShellFileOperation.MoveAsync(sourcePaths, targetFolder);
 
+            if (!result.Success && !result.Aborted)
+                Log.Warn("FilePane.Drop", $"{(isCopy ? "copy" : "move")} to {targetFolder} failed: {result.Error}");
+
             vm.StatusMessage = result.Success
                 ? (isCopy ? $"{sourcePaths.Length} 項目をコピーしました" : $"{sourcePaths.Length} 項目を移動しました")
                 : result.Aborted
@@ -799,11 +806,14 @@ public partial class FilePaneControl : UserControl
                     : $"{(isCopy ? "コピー" : "移動")}エラー: {result.Error}";
 
             // Refresh all panes that might be affected
-            try { await vm.Refresh(); } catch { }
-            try { await RefreshOtherPanesShowingPaths(sourcePaths, vm); } catch { }
+            try { await vm.Refresh(); }
+            catch (Exception ex) { Log.Warn("FilePane.Drop", "refresh after drop failed", ex); }
+            try { await RefreshOtherPanesShowingPaths(sourcePaths, vm); }
+            catch (Exception ex) { Log.Warn("FilePane.Drop", "refresh of other panes failed", ex); }
         }
         catch (Exception ex)
         {
+            Log.Error("FilePane.Drop", targetFolder, ex);
             vm.StatusMessage = $"エラー: {ex.Message}";
         }
 

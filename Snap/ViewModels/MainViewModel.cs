@@ -152,7 +152,7 @@ public partial class MainViewModel : ObservableObject
                 _todayTimer.Start();
             }
         }
-        catch { }
+        catch (Exception ex) { Log.Warn("Main.TrackedTabChanged", "tree sync / today timer failed", ex); }
     }
 
     private async void OnTreeFolderSelected(string path)
@@ -165,7 +165,7 @@ public partial class MainViewModel : ObservableObject
                 await pane.SelectedTab.NavigateToAsync(path);
             }
         }
-        catch { }
+        catch (Exception ex) { Log.UserError("Main.TreeNavigate", $"開けません（{path}）", ex); }
     }
 
     private async void OnSidebarNavigate(string path)
@@ -178,7 +178,7 @@ public partial class MainViewModel : ObservableObject
                 await pane.SelectedTab.NavigateToAsync(path);
             }
         }
-        catch { }
+        catch (Exception ex) { Log.UserError("Main.SidebarNavigate", $"開けません（{path}）", ex); }
     }
 
 }

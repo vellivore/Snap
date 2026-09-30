@@ -29,19 +29,31 @@ public static class ShellFileOperation
         var tcs = new TaskCompletionSource<Result>(TaskCreationOptions.RunContinuationsAsynchronously);
         IntPtr owner;
         try { owner = ResolveOwner(); }
-        catch { owner = IntPtr.Zero; }
+        catch (Exception ex)
+        {
+            Snap.Services.Log.Warn("ShellFileOperation.Owner", "owner window not resolved; dialogs unowned", ex);
+            owner = IntPtr.Zero;
+        }
 
         // IFileOperation は STA かつ独自に UI（UAC/進捗/衝突ダイアログ）を出すため、
         // UI スレッドをブロックしないよう専用 STA スレッドで実行する。
         var thread = new Thread(() =>
         {
             try { tcs.TrySetResult(Execute(op, sources, destDir, owner)); }
-            catch (Exception ex) { tcs.TrySetResult(new Result(false, false, ex.Message)); }
+            catch (Exception ex)
+            {
+                Snap.Services.Log.Error("ShellFileOperation", $"{op} failed", ex);
+                tcs.TrySetResult(new Result(false, false, ex.Message));
+            }
         })
         { IsBackground = true, Name = "ShellFileOperation" };
         thread.SetApartmentState(ApartmentState.STA);
         try { thread.Start(); }
-        catch (Exception ex) { tcs.TrySetResult(new Result(false, false, ex.Message)); }
+        catch (Exception ex)
+        {
+            Snap.Services.Log.Error("ShellFileOperation", "worker thread not started", ex);
+            tcs.TrySetResult(new Result(false, false, ex.Message));
+        }
         return tcs.Task;
     }
 
@@ -86,7 +98,12 @@ public static class ShellFileOperation
             {
                 IShellItem item;
                 try { item = CreateItem(src); }
-                catch { continue; } // 解決できないソースはスキップ
+                catch (Exception ex)
+                {
+                    // 解決できないソースはスキップ
+                    Snap.Services.Log.Warn("ShellFileOperation", $"source skipped (unresolvable): {src}", ex);
+                    continue;
+                }
                 try
                 {
                     int qhr = op switch

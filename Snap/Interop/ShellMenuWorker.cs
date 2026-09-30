@@ -57,7 +57,7 @@ internal sealed class ShellMenuWorker
             if (!Dispatcher.HasShutdownStarted)
                 Dispatcher.InvokeShutdown();
         }
-        catch { }
+        catch (Exception ex) { Snap.Services.Log.Warn("ShellMenuWorker.Shutdown", "worker shutdown failed", ex); }
     }
 
     public bool IsWorkerThread => Dispatcher.CheckAccess();
@@ -104,8 +104,9 @@ internal sealed class ShellMenuWorker
             result = op.Result;
             return true;
         }
-        catch
+        catch (Exception ex)
         {
+            Snap.Services.Log.Warn("ShellMenuWorker.TryInvoke", "menu message forwarding failed", ex);
             return false;
         }
     }
@@ -132,14 +133,14 @@ internal sealed class ShellMenuWorker
                 if (!string.IsNullOrEmpty(exe) && File.Exists(exe))
                     ShellContextMenu.WarmUpItemMenu(exe);
             }
-            catch { }
+            catch (Exception ex) { Snap.Services.Log.Warn("ShellMenuWorker.WarmUp", "item menu warm-up failed", ex); }
             try
             {
                 var temp = Path.GetTempPath();
                 if (!string.IsNullOrEmpty(temp) && Directory.Exists(temp))
                     ShellContextMenu.WarmUpBackgroundMenu(Path.TrimEndingDirectorySeparator(temp));
             }
-            catch { }
+            catch (Exception ex) { Snap.Services.Log.Warn("ShellMenuWorker.WarmUp", "background menu warm-up failed", ex); }
             ShellContextMenu.TimingLog($"warmup: done in {sw.ElapsedMilliseconds} ms");
         });
     }

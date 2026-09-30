@@ -69,6 +69,9 @@ public partial class MainWindow : Window
         var versionStr = version != null ? $"v{version.Major}.{version.Minor}.{version.Build}" : "";
         TitleText.Text = $"Snap {versionStr}";
 
+        // Failures that started from a user action are also shown in the status bar (#10).
+        Log.UserFacing += OnUserFacingError;
+
         Loaded += MainWindow_Loaded;
         Closing += MainWindow_Closing;
         InstallKeyboardHook();
@@ -98,7 +101,7 @@ public partial class MainWindow : Window
                         SendMessage(hwnd, 0x0080, (IntPtr)0, smallIcon);
                 }
             }
-            catch { }
+            catch (Exception ex) { Log.Warn("MainWindow.Icon", "window icon not set", ex); }
         };
     }
 
@@ -212,8 +215,15 @@ public partial class MainWindow : Window
         // Speeds up the first right-click; never shows UI, all errors swallowed.
         _ = Dispatcher.BeginInvoke(DispatcherPriority.ApplicationIdle, () =>
         {
-            try { _ = Snap.Interop.ShellMenuWorker.Instance.WarmUpAsync().ContinueWith(t => { _ = t.Exception; }); }
-            catch { }
+            try
+            {
+                _ = Snap.Interop.ShellMenuWorker.Instance.WarmUpAsync().ContinueWith(t =>
+                {
+                    if (t.Exception != null)
+                        Log.Warn("MainWindow.WarmUp", "shell menu warm-up failed", t.Exception);
+                });
+            }
+            catch (Exception ex) { Log.Warn("MainWindow.WarmUp", "shell menu warm-up not started", ex); }
         });
     }
 
@@ -332,9 +342,10 @@ public partial class MainWindow : Window
             _viewModel.Terminal.Dispose();
             SaveSettings();
         }
-        catch
+        catch (Exception ex)
         {
             // Never crash on close
+            Log.Error("MainWindow.Closing", "shutdown cleanup failed", ex);
         }
     }
 
@@ -388,7 +399,11 @@ public partial class MainWindow : Window
             _cpuCounter = new PerformanceCounter("Processor", "% Processor Time", "_Total");
             _cpuCounter.NextValue();
         }
-        catch { _cpuCounter = null; }
+        catch (Exception ex)
+        {
+            Log.Warn("MainWindow.CpuCounter", "CPU performance counter unavailable", ex);
+            _cpuCounter = null;
+        }
 
         _statusTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(1) };
         _statusTimer.Tick += (s, e) => UpdateSystemInfo();
@@ -396,11 +411,20 @@ public partial class MainWindow : Window
         UpdateSystemInfo();
     }
 
+    // The status tick runs every second; log each failing source only once per session.
+    private readonly HashSet<string> _sysInfoWarned = new();
+
+    private void WarnSysInfoOnce(string source, Exception ex)
+    {
+        if (_sysInfoWarned.Add(source))
+            Log.Warn("MainWindow.SystemInfo", $"{source} status unavailable (further failures not logged)", ex);
+    }
+
     private void UpdateSystemInfo()
     {
         // CPU
         try { CpuText.Text = $"CPU {_cpuCounter?.NextValue() ?? 0:F0}%"; }
-        catch { CpuText.Text = "CPU --"; }
+        catch (Exception ex) { CpuText.Text = "CPU --"; WarnSysInfoOnce("cpu", ex); }
 
         // Memory
         try
@@ -413,7 +437,7 @@ public partial class MainWindow : Window
                 MemText.Text = $"MEM {used:F1}/{total:F0}GB";
             }
         }
-        catch { MemText.Text = "MEM --"; }
+        catch (Exception ex) { MemText.Text = "MEM --"; WarnSysInfoOnce("mem", ex); }
 
         // Battery
         try
@@ -430,7 +454,7 @@ public partial class MainWindow : Window
                 }
             }
         }
-        catch { BatteryText.Text = ""; }
+        catch (Exception ex) { BatteryText.Text = ""; WarnSysInfoOnce("battery", ex); }
 
         // Clock
         ClockText.Text = DateTime.Now.ToString("yyyy/MM/dd HH:mm:ss");
@@ -516,6 +540,13 @@ public partial class MainWindow : Window
             _trackedTab.PropertyChanged += OnTrackedTabChanged;
             StatusBarText.Text = _trackedTab.StatusMessage;
         }
+    }
+
+    private void OnUserFacingError(string message)
+    {
+        void Show() => StatusBarText.Text = message;
+        if (Dispatcher.CheckAccess()) Show();
+        else Dispatcher.BeginInvoke(Show);
     }
 
     private void OnTrackedTabChanged(object? sender, PropertyChangedEventArgs e)
@@ -606,7 +637,7 @@ public partial class MainWindow : Window
             {
                 Process.Start(new ProcessStartInfo(settingsPath) { UseShellExecute = true });
             }
-            catch { }
+            catch (Exception ex) { Log.UserError("MainWindow.OpenSettings", $"設定ファイルを開けません（{settingsPath}）", ex); }
         };
 
         cp.OpenTerminalAction = () =>
@@ -620,7 +651,7 @@ public partial class MainWindow : Window
                     UseShellExecute = true,
                 });
             }
-            catch { }
+            catch (Exception ex) { Log.UserError("MainWindow.OpenTerminal", $"pwsh を起動できません（{dir}）", ex); }
         };
     }
 

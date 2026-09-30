@@ -166,7 +166,7 @@ public partial class CommandPaletteViewModel : ObservableObject
                             UseShellExecute = true
                         });
                     }
-                    catch { }
+                    catch (Exception ex) { Snap.Services.Log.UserError("CommandPalette.Open", $"ファイルを開けません（{item.Data}）", ex); }
                 }
                 break;
             case CommandKind.GrepResult:
@@ -180,7 +180,7 @@ public partial class CommandPaletteViewModel : ObservableObject
                             UseShellExecute = true
                         });
                     }
-                    catch { }
+                    catch (Exception ex) { Snap.Services.Log.UserError("CommandPalette.Open", $"ファイルを開けません（{item.Data}）", ex); }
                 }
                 break;
         }
@@ -437,7 +437,11 @@ public partial class CommandPaletteViewModel : ObservableObject
                 }
             }
         }
-        catch { }
+        catch (Exception ex)
+        {
+            // Typing a path hits unreadable / half-typed locations routinely: trace only.
+            Snap.Services.Log.Warn("CommandPalette.PathResults", query, ex);
+        }
     }
 
     // ==================== Recursive file name search ====================
@@ -560,6 +564,8 @@ public partial class CommandPaletteViewModel : ObservableObject
         SearchStatusText = "ファイル内検索中...";
 
         var resultCount = 0;
+        var skipped = 0;
+        Exception? firstSkip = null;
         var baseDir = CurrentDirectory;
 
         await Task.Run(() =>
@@ -626,13 +632,24 @@ public partial class CommandPaletteViewModel : ObservableObject
                         }
                     }
                 }
-                catch { }
+                catch (OperationCanceledException) { throw; }
+                catch (Exception ex)
+                {
+                    // Locked / unreadable file: skip it, but count it (one log line per search).
+                    skipped++;
+                    firstSkip ??= ex;
+                }
             }
         }, token);
 
-        SearchStatusText = Results.Count >= MaxResults
+        if (skipped > 0)
+            Snap.Services.Log.Warn("CommandPalette.ContentSearch",
+                $"{skipped} file(s) unreadable under {baseDir}; first error shown", firstSkip);
+
+        SearchStatusText = (Results.Count >= MaxResults
             ? $"{Results.Count}件（上限に達しました）"
-            : Results.Count > 0 ? $"{Results.Count}件" : "該当なし";
+            : Results.Count > 0 ? $"{Results.Count}件" : "該当なし")
+            + (skipped > 0 ? $"・読めないファイル {skipped} 件" : "");
     }
 }
 

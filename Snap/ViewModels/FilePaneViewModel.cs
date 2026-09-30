@@ -107,6 +107,7 @@ public partial class FilePaneViewModel : ObservableObject
                 }
                 catch (Exception ex)
                 {
+                    Log.Warn("FilePane.Navigate", $"invalid path: {path}", ex);
                     StatusMessage = $"パスが無効です: {ex.Message}";
                     return;
                 }
@@ -176,20 +177,24 @@ public partial class FilePaneViewModel : ObservableObject
             GoBackCommand.NotifyCanExecuteChanged();
             GoForwardCommand.NotifyCanExecuteChanged();
         }
-        catch (UnauthorizedAccessException)
+        catch (UnauthorizedAccessException ex)
         {
+            Log.Warn("FilePane.Navigate", $"access denied: {path}", ex);
             StatusMessage = "アクセスが拒否されました。";
         }
         catch (DirectoryNotFoundException ex)
         {
+            Log.Warn("FilePane.Navigate", $"not found: {path}", ex);
             StatusMessage = $"ディレクトリが見つかりません: {path} ({ex.Message})";
         }
         catch (IOException ex)
         {
+            Log.Warn("FilePane.Navigate", $"io error: {path}", ex);
             StatusMessage = $"IOエラー: {ex.Message}";
         }
         catch (Exception ex)
         {
+            Log.Error("FilePane.Navigate", path, ex);
             StatusMessage = $"エラー: {ex.Message}";
         }
         finally
@@ -252,6 +257,7 @@ public partial class FilePaneViewModel : ObservableObject
             }
             catch (Exception ex)
             {
+                Log.Warn("FilePane.OpenItem", item.FullPath, ex);
                 StatusMessage = $"ファイルを開けません: {ex.Message}";
             }
         }
@@ -354,6 +360,9 @@ public partial class FilePaneViewModel : ObservableObject
             if (isCut && result.Success)
                 _clipboardPaths = null;
 
+            if (!result.Success && !result.Aborted)
+                Log.Warn("FilePane.Paste", $"{(isCut ? "move" : "copy")} to {destDir} failed: {result.Error}");
+
             StatusMessage = result.Success
                 ? (isCut ? "移動しました" : "貼り付けました")
                 : result.Aborted
@@ -394,6 +403,9 @@ public partial class FilePaneViewModel : ObservableObject
             // Shell の IFileOperation で削除（権限が必要な対象は UAC 昇格、ごみ箱へ送る＝元に戻せる）
             var opResult = await Interop.ShellFileOperation.DeleteAsync(
                 items.Select(i => i.FullPath).ToList());
+
+            if (!opResult.Success && !opResult.Aborted)
+                Log.Warn("FilePane.Delete", $"delete failed: {opResult.Error}");
 
             StatusMessage = opResult.Success
                 ? $"{items.Count} 項目をごみ箱へ移動しました"
@@ -447,6 +459,7 @@ public partial class FilePaneViewModel : ObservableObject
         }
         catch (Exception ex)
         {
+            Log.Warn("FilePane.Rename", $"{item.FullPath} -> {newName}", ex);
             StatusMessage = $"名前変更エラー: {ex.Message}";
         }
     }
@@ -470,6 +483,7 @@ public partial class FilePaneViewModel : ObservableObject
         }
         catch (Exception ex)
         {
+            Log.Warn("FilePane.Properties", item.FullPath, ex);
             StatusMessage = $"プロパティを表示できません: {ex.Message}";
         }
     }
@@ -507,9 +521,10 @@ public partial class FilePaneViewModel : ObservableObject
                     Icon = icon,
                 });
             }
-            catch
+            catch (Exception ex)
             {
                 // Skip inaccessible drives
+                Log.Warn("FilePane.LoadDrives", drive.Name, ex);
             }
         }
         return items;
@@ -546,15 +561,17 @@ public partial class FilePaneViewModel : ObservableObject
                         Icon = icon,
                     });
                 }
-                catch
+                catch (Exception ex)
                 {
                     // Skip inaccessible directories
+                    Log.Warn("FilePane.LoadDirectory", $"skip dir: {dir.FullName}", ex);
                 }
             }
         }
-        catch
+        catch (Exception ex)
         {
             // Skip if enumeration fails
+            Log.Warn("FilePane.LoadDirectory", $"directory enumeration failed: {path}", ex);
         }
 
         // Files
@@ -576,15 +593,17 @@ public partial class FilePaneViewModel : ObservableObject
                         Icon = icon,
                     });
                 }
-                catch
+                catch (Exception ex)
                 {
                     // Skip inaccessible files
+                    Log.Warn("FilePane.LoadDirectory", $"skip file: {file.FullName}", ex);
                 }
             }
         }
-        catch
+        catch (Exception ex)
         {
             // Skip if enumeration fails
+            Log.Warn("FilePane.LoadDirectory", $"file enumeration failed: {path}", ex);
         }
 
         return items;
@@ -651,7 +670,7 @@ public partial class FilePaneViewModel : ObservableObject
                         Icon = icon,
                     });
                 }
-                catch { }
+                catch (Exception ex) { Log.Warn("FilePane.NetShares", sharePath, ex); }
             }
         }
         finally

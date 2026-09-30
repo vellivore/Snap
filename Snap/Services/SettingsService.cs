@@ -30,9 +30,10 @@ public static class SettingsService
             var json = File.ReadAllText(SettingsPath);
             return JsonSerializer.Deserialize<AppSettings>(json, JsonOptions) ?? new AppSettings();
         }
-        catch
+        catch (Exception ex)
         {
             // Corrupted JSON or any other error → default
+            Log.Error("SettingsService.Load", $"settings.json unreadable, using defaults: {SettingsPath}", ex);
             return new AppSettings();
         }
     }
@@ -50,9 +51,10 @@ public static class SettingsService
             File.WriteAllText(tmp, json);
             File.Move(tmp, SettingsPath, overwrite: true);
         }
-        catch
+        catch (Exception ex)
         {
-            // Write failure → ignore silently
+            // Write failure → keep running, but leave a trace.
+            Log.Error("SettingsService.Save", $"settings.json save failed: {SettingsPath}", ex);
         }
     }
 }

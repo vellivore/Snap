@@ -3,6 +3,7 @@ using System.IO;
 using CommunityToolkit.Mvvm.ComponentModel;
 using Snap.Helpers;
 using Snap.Models;
+using Snap.Services;
 
 namespace Snap.ViewModels;
 
@@ -89,7 +90,8 @@ public partial class SidebarViewModel : ObservableObject
         if (string.IsNullOrEmpty(name)) name = path;
 
         var item = new BookmarkItem { Name = name, FullPath = Path.GetFullPath(path) };
-        try { item.Icon = IconHelper.GetIconAndType(path, true).icon; } catch { }
+        try { item.Icon = IconHelper.GetIconAndType(path, true).icon; }
+        catch (Exception ex) { Log.Warn("Sidebar.Icon", path, ex); }
         return item;
     }
 }

@@ -229,9 +229,10 @@ public partial class FloatingTerminalViewModel : ObservableObject, IDisposable
                 ShellWindowReady?.Invoke();
             }
         }
-        catch
+        catch (Exception ex)
         {
             // Failed to start
+            Snap.Services.Log.UserError("Terminal.StartShell", "ターミナルを起動できません", ex);
         }
     }
 
@@ -248,7 +249,7 @@ public partial class FloatingTerminalViewModel : ObservableObject, IDisposable
                 if (!_shellProcess.HasExited)
                     _shellProcess.Kill(true);
             }
-            catch { }
+            catch (Exception ex) { Snap.Services.Log.Warn("Terminal.StopShell", "shell kill failed", ex); }
             finally
             {
                 _shellProcess.Dispose();

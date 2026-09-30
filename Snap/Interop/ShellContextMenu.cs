@@ -74,16 +74,8 @@ internal static class ShellContextMenu
 
     internal static void TimingLog(string message)
     {
-        var line = $"[Snap.ShellMenu] {DateTime.Now:HH:mm:ss.fff} {message}";
-        System.Diagnostics.Debug.WriteLine(line);
-        System.Diagnostics.Trace.WriteLine(line);
-        try
-        {
-            var logPath = Environment.GetEnvironmentVariable("SNAP_MENU_TIMING_LOG");
-            if (!string.IsNullOrEmpty(logPath))
-                File.AppendAllText(logPath, line + Environment.NewLine);
-        }
-        catch { }
+        // Menu timing goes to the unified log (%APPDATA%\Snap\snap.log) at Info level.
+        Snap.Services.Log.Info("ShellMenu", message);
     }
 
     // ==================== Core ====================
@@ -106,16 +98,21 @@ internal static class ShellContextMenu
                 if (p != null)
                 {
                     try { p.SnapCmdIds = AppendSnapItems(p.HMenu, customItems); }
-                    catch { }
+                    catch (Exception ex) { Snap.Services.Log.Warn("ShellMenu.AppendSnapItems", "Snap items not added", ex); }
                 }
                 return p;
             });
         }
-        catch
+        catch (Exception ex)
         {
+            Snap.Services.Log.UserError($"ShellMenu.{kind}", "メニューを表示できません", ex);
             return;
         }
-        if (pm == null) return;
+        if (pm == null)
+        {
+            Snap.Services.Log.UserError($"ShellMenu.{kind}", "メニューを表示できません（詳細は snap.log）");
+            return;
+        }
 
         HwndSource? hwndSource = null;
         HwndSourceHook? hook = null;
@@ -196,8 +193,10 @@ internal static class ShellContextMenu
                 }
             }
         }
-        catch (COMException) { }
-        catch (Exception) { }
+        catch (Exception ex)
+        {
+            Snap.Services.Log.UserError($"ShellMenu.{kind}", "メニューの実行に失敗しました", ex);
+        }
         finally
         {
             if (hook != null && hwndSource != null)
@@ -212,8 +211,9 @@ internal static class ShellContextMenu
                 else
                     _ = worker.Dispatcher.BeginInvoke(() => ReleaseOnWorker(toRelease));
             }
-            catch
+            catch (Exception ex)
             {
+                Snap.Services.Log.Warn("ShellMenu.Release", "worker release failed; handles only", ex);
                 ReleaseHandlesOnly(toRelease);
             }
         }
@@ -261,8 +261,9 @@ internal static class ShellContextMenu
 
             return FinishPrepare(pm, flags);
         }
-        catch
+        catch (Exception ex)
         {
+            Snap.Services.Log.Warn("ShellMenu.PrepareItemMenu", string.Join(" | ", paths), ex);
             ReleaseOnWorker(pm);
             return null;
         }
@@ -286,8 +287,9 @@ internal static class ShellContextMenu
 
             return FinishPrepare(pm, flags);
         }
-        catch
+        catch (Exception ex)
         {
+            Snap.Services.Log.Warn("ShellMenu.PrepareBackgroundMenu", folderPath, ex);
             ReleaseOnWorker(pm);
             return null;
         }
@@ -316,7 +318,7 @@ internal static class ShellContextMenu
             if (pm.ContextMenu != null)
                 Marshal.FinalReleaseComObject(pm.ContextMenu);
         }
-        catch { }
+        catch (Exception ex) { Snap.Services.Log.Warn("ShellMenu.Release", "IContextMenu release failed", ex); }
         pm.ContextMenu = null;
         pm.ContextMenu2 = null;
         pm.ContextMenu3 = null;
@@ -325,7 +327,7 @@ internal static class ShellContextMenu
             if (pm.ShellFolder != null)
                 Marshal.FinalReleaseComObject(pm.ShellFolder);
         }
-        catch { }
+        catch (Exception ex) { Snap.Services.Log.Warn("ShellMenu.Release", "IShellFolder release failed", ex); }
         pm.ShellFolder = null;
     }
 
@@ -416,6 +418,10 @@ internal static class ShellContextMenu
         {
             contextMenu.InvokeCommand(ref ci);
         }
-        catch (COMException) { }
+        catch (COMException ex)
+        {
+            // Cancelled verbs (e.g. user closed a shell dialog) also land here, so Warn only.
+            Snap.Services.Log.Warn("ShellMenu.InvokeCommand", $"cmd={cmd} dir={directory}", ex);
+        }
     }
 }

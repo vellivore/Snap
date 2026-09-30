@@ -27,8 +27,9 @@ public class UsageTracker
                 _usage = new Dictionary<string, int>(data, StringComparer.OrdinalIgnoreCase);
             }
         }
-        catch
+        catch (Exception ex)
         {
+            Log.Error("UsageTracker.Load", $"usage.json unreadable, starting empty: {UsagePath}", ex);
             _usage = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
         }
     }
@@ -60,9 +61,9 @@ public class UsageTracker
             File.WriteAllText(tmp, json);
             File.Move(tmp, UsagePath, overwrite: true);
         }
-        catch
+        catch (Exception ex)
         {
-            // Ignore write errors
+            Log.Warn("UsageTracker.Save", $"usage.json save failed: {UsagePath}", ex);
         }
     }
 

@@ -70,6 +70,43 @@ public partial class FilePaneViewModel : ObservableObject
     // All items before filtering
     private List<FileItem> _allItems = new();
 
+    /// <summary>Filter bar text (Ctrl+Shift+F, #14): <see cref="Items"/> shows only the entries of
+    /// the folder whose name contains it. Cleared by Esc and by moving to another folder.</summary>
+    [ObservableProperty]
+    private string _filterText = string.Empty;
+
+    /// <summary>True while the filter bar is shown.</summary>
+    [ObservableProperty]
+    private bool _isFilterVisible;
+
+    // Set while navigation clears the filter itself (it re-sorts right after).
+    private bool _suppressFilterApply;
+
+    partial void OnFilterTextChanged(string value)
+    {
+        if (_suppressFilterApply) return;
+        ApplySortToItems();
+        UpdateItemCountStatus(skipped: 0);
+    }
+
+    /// <summary>Ctrl+Shift+F: shows the filter bar (the view focuses it).</summary>
+    public void ShowFilter() => IsFilterVisible = true;
+
+    /// <summary>Esc in the filter bar: hides it and shows every entry again.</summary>
+    public void ClearFilter()
+    {
+        IsFilterVisible = false;
+        FilterText = string.Empty;
+    }
+
+    private void UpdateItemCountStatus(int skipped)
+    {
+        var count = string.IsNullOrEmpty(FilterText)
+            ? $"{Items.Count} 項目"
+            : $"{Items.Count} / {_allItems.Count} 項目（絞り込み: {FilterText}）";
+        StatusMessage = skipped > 0 ? $"{count}（読めない項目 {skipped} 件を省略）" : count;
+    }
+
     // Sorting state
     private string _sortColumn = "Name";
     private bool _sortAscending = true;
@@ -189,17 +226,22 @@ public partial class FilePaneViewModel : ObservableObject
 
             Application.Current.Dispatcher.Invoke(() =>
             {
-                _allItems = items;
-                ApplySortToItems();
                 // A custom tab name is kept across refreshes / paste / delete (same folder)
                 // and reset only when the tab moves to a different folder (#12).
                 var pathChanged = !string.Equals(CurrentPath, path, StringComparison.OrdinalIgnoreCase);
+                _allItems = items;
+                // The filter belongs to the folder it was typed in: moving clears it, a refresh keeps it (#14).
+                if (pathChanged)
+                {
+                    _suppressFilterApply = true;
+                    try { IsFilterVisible = false; FilterText = string.Empty; }
+                    finally { _suppressFilterApply = false; }
+                }
+                ApplySortToItems();
                 CurrentPath = path;
                 if (pathChanged || !HasCustomTabHeader)
                     ResetTabHeader();
-                StatusMessage = load.Skipped > 0
-                    ? $"{Items.Count} 項目（読めない項目 {load.Skipped} 件を省略）"
-                    : $"{Items.Count} 項目";
+                UpdateItemCountStatus(load.Skipped);
             });
 
             // Update navigation history (only after a successful load)
@@ -274,6 +316,32 @@ public partial class FilePaneViewModel : ObservableObject
         if (!CanGoForward) return;
         var target = _historyIndex + 1;
         await NavigateCoreAsync(_history[target], addToHistory: false, historyIndex: target);
+    }
+
+    /// <summary>
+    /// The folder above <paramref name="path"/>: the parent directory; above a drive root is the
+    /// PC view; above \\server\share is \\server. Null at the PC view and at \\server.
+    /// </summary>
+    public static string? GetParentPath(string path)
+    {
+        if (string.IsNullOrEmpty(path) || path == PcViewPath) return null;
+        if (path.StartsWith(@"\\"))
+        {
+            if (IsUncServerPath(path)) return null;
+            var trimmed = path.TrimEnd('\\');
+            var lastSep = trimmed.LastIndexOf('\\');
+            return lastSep > 1 ? trimmed[..lastSep] : null;
+        }
+        return Directory.GetParent(path)?.FullName ?? PcViewPath;
+    }
+
+    /// <summary>Backspace / Alt+Up / double-click on empty space: go to the folder above.</summary>
+    [RelayCommand]
+    public async Task GoUp()
+    {
+        var parent = GetParentPath(CurrentPath);
+        if (parent != null)
+            await NavigateToAsync(parent);
     }
 
     [RelayCommand]
@@ -564,27 +632,64 @@ public partial class FilePaneViewModel : ObservableObject
         }
     }
 
-    public async Task ShowProperties(FileItem? item)
+    /// <summary>
+    /// Enter on the list (#14): when only files are selected, opens all of them; when a folder is
+    /// among them, moves into the first folder (in list order).
+    /// </summary>
+    public async Task OpenSelection(System.Collections.IList? selectedItems)
     {
-        if (item == null || item.Name == "..") return;
+        var items = SelectedInListOrder(selectedItems);
+        if (items.Count == 0) return;
+
+        var firstFolder = items.FirstOrDefault(f => f.IsDirectory);
+        if (firstFolder != null)
+        {
+            await NavigateToAsync(firstFolder.FullPath);
+            return;
+        }
+        foreach (var file in items)
+            await OpenItem(file);
+    }
+
+    private List<FileItem> SelectedInListOrder(System.Collections.IList? selectedItems) =>
+        (selectedItems?.OfType<FileItem>() ?? Enumerable.Empty<FileItem>())
+            .Where(f => f.Name != "..")
+            .OrderBy(f => Items.IndexOf(f))
+            .ToList();
+
+    /// <summary>Alt+Enter: the shell's Properties dialog for the item (this folder when null).</summary>
+    public void ShowProperties(FileItem? item)
+    {
+        var target = item?.FullPath ?? CurrentPath;
+        if (string.IsNullOrEmpty(target) || target == PcViewPath) return;
+
+        if (!Interop.ShellProperties.Show(target, out var error))
+        {
+            Log.Warn("FilePane.Properties", $"{target}: {error}");
+            StatusMessage = $"プロパティを表示できません: {error}";
+        }
+    }
+
+    /// <summary>Ctrl+Shift+C: copies the selected items' full paths as text, one per line
+    /// (this folder's path when nothing is selected).</summary>
+    public void CopyFullPaths(System.Collections.IList? selectedItems)
+    {
+        var paths = SelectedInListOrder(selectedItems).Select(f => f.FullPath).ToList();
+        if (paths.Count == 0 && CurrentPath != PcViewPath)
+            paths.Add(CurrentPath);
+        if (paths.Count == 0) return;
 
         try
         {
-            await Task.Run(() =>
-            {
-                var psi = new ProcessStartInfo
-                {
-                    FileName = "explorer.exe",
-                    Arguments = $"/select,\"{item.FullPath}\"",
-                    UseShellExecute = true
-                };
-                Process.Start(psi);
-            });
+            Interop.ClipboardText.Set(string.Join(Environment.NewLine, paths));
+            StatusMessage = paths.Count == 1
+                ? $"パスをコピーしました: {paths[0]}"
+                : $"{paths.Count} 件のパスをコピーしました";
         }
         catch (Exception ex)
         {
-            Log.Warn("FilePane.Properties", item.FullPath, ex);
-            StatusMessage = $"プロパティを表示できません: {ex.Message}";
+            Log.Warn("FilePane.CopyPath", "clipboard write failed", ex);
+            StatusMessage = $"クリップボードに書き込めません: {ex.Message}";
         }
     }
 
@@ -822,8 +927,12 @@ public partial class FilePaneViewModel : ObservableObject
 
     private void ApplySortToItems()
     {
-        var dirs = _allItems.Where(i => i.IsDirectory);
-        var files = _allItems.Where(i => !i.IsDirectory);
+        IEnumerable<FileItem> source = _allItems;
+        if (!string.IsNullOrEmpty(FilterText))
+            source = source.Where(i => i.Name.Contains(FilterText, StringComparison.OrdinalIgnoreCase));
+
+        var dirs = source.Where(i => i.IsDirectory);
+        var files = source.Where(i => !i.IsDirectory);
 
         dirs = ApplySortOrder(dirs);
         files = ApplySortOrder(files);

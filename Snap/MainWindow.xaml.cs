@@ -7,6 +7,7 @@ using System.Windows.Input;
 using System.Windows.Interop;
 using System.Windows.Media;
 using System.Windows.Threading;
+using CommunityToolkit.Mvvm.Input;
 using Snap.Helpers;
 using Snap.Models;
 using Snap.Services;
@@ -25,7 +26,8 @@ public partial class MainWindow : Window
     private AppSettings _settings = new();
 
 
-    // Low-level keyboard hook for Escape when conhost has focus
+    // Low-level keyboard hook, installed only while the embedded terminal is shown (#14): the
+    // console window has the keyboard then, so Esc / Ctrl+T / Ctrl+Space never reach WPF.
     private IntPtr _keyboardHookId = IntPtr.Zero;
     private LowLevelKeyboardProc? _keyboardHookProc;
 
@@ -49,6 +51,27 @@ public partial class MainWindow : Window
 
     [DllImport("user32.dll")]
     private static extern IntPtr GetForegroundWindow();
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct GUITHREADINFO
+    {
+        public int cbSize;
+        public uint flags;
+        public IntPtr hwndActive, hwndFocus, hwndCapture, hwndMenuOwner, hwndMoveSize, hwndCaret;
+        public RECT rcCaret;
+    }
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetGUIThreadInfo(uint idThread, ref GUITHREADINFO info);
+
+    /// <summary>The window with the keyboard focus on the foreground thread (another process's
+    /// console window while the terminal is focused).</summary>
+    private static IntPtr GetForegroundFocus()
+    {
+        var info = new GUITHREADINFO { cbSize = Marshal.SizeOf<GUITHREADINFO>() };
+        return GetGUIThreadInfo(0, ref info) ? info.hwndFocus : IntPtr.Zero;
+    }
 
     private static bool IsKeyDown(int vk) => (GetAsyncKeyState(vk) & 0x8000) != 0;
 
@@ -75,7 +98,29 @@ public partial class MainWindow : Window
 
         Loaded += MainWindow_Loaded;
         Closing += MainWindow_Closing;
-        InstallKeyboardHook();
+
+        // Ctrl+T drives the view (the terminal's HwndHost), so it is bound here; the rest are
+        // MainWindow.xaml InputBindings on MainViewModel commands (#14). Ctrl+Space is in
+        // Window_PreviewKeyDown: the ListView takes Ctrl+Space (select toggle) before a
+        // KeyBinding on the window would see it.
+        InputBindings.Add(new KeyBinding(
+            new RelayCommand(() => ToggleFloatingTerminalAsync().SafeFireAndForget("MainWindow.Terminal", "ターミナルを開けません")),
+            Key.T, ModifierKeys.Control));
+        _viewModel.PaneFocusRequested += FocusPane;
+
+        // The low-level hook lives exactly as long as the terminal is shown (#14).
+        _viewModel.Terminal.PropertyChanged += (_, e) =>
+        {
+            if (e.PropertyName != nameof(FloatingTerminalViewModel.IsVisible)) return;
+            if (_viewModel.Terminal.IsVisible) InstallKeyboardHook();
+            else
+            {
+                UninstallKeyboardHook();
+                // The console window had the keyboard: give it back to Snap's active list.
+                Activate();
+                if (_viewModel.ActivePane is { } pane) FocusPane(pane);
+            }
+        };
         // Safety net: a WH_KEYBOARD_LL hook that outlives its delegate causes system-wide
         // input lag. Closing can be bypassed (Environment.Exit/Shutdown), so also unhook
         // when the dispatcher begins shutting down.
@@ -219,6 +264,7 @@ public partial class MainWindow : Window
         // Views ask MainViewModel for cross-pane work through routed events (#13).
         AddHandler(TabPaneControl.TabMoveRequestedEvent, new RoutedEventHandler(OnTabMoveRequested));
         AddHandler(FilePaneControl.RefreshPanesRequestedEvent, new RoutedEventHandler(OnRefreshPanesRequested));
+        AddHandler(FilePaneControl.OpenInNewTabRequestedEvent, new RoutedEventHandler(OnOpenInNewTabRequested));
 
         InitStatusTimer();
 
@@ -303,11 +349,16 @@ public partial class MainWindow : Window
 
     private void InstallKeyboardHook()
     {
-        _keyboardHookProc = LowLevelKeyboardCallback;
+        if (_keyboardHookId != IntPtr.Zero) return;
+        _keyboardHookProc ??= LowLevelKeyboardCallback;
         using var curProcess = Process.GetCurrentProcess();
         using var curModule = curProcess.MainModule!;
         _keyboardHookId = SetWindowsHookEx(WH_KEYBOARD_LL, _keyboardHookProc,
             GetModuleHandle(curModule.ModuleName), 0);
+        if (_keyboardHookId == IntPtr.Zero)
+            Log.Warn("MainWindow.KeyboardHook", $"SetWindowsHookEx failed ({Marshal.GetLastWin32Error()})");
+        else
+            Log.Info("MainWindow.KeyboardHook", "installed (terminal shown)");
     }
 
     private void UninstallKeyboardHook()
@@ -316,6 +367,7 @@ public partial class MainWindow : Window
         {
             UnhookWindowsHookEx(_keyboardHookId);
             _keyboardHookId = IntPtr.Zero;
+            Log.Info("MainWindow.KeyboardHook", "removed");
         }
     }
 
@@ -323,10 +375,14 @@ public partial class MainWindow : Window
     {
         if (nCode >= 0 && (int)wParam == WM_KEYDOWN)
         {
-            // Only handle when Snap is the foreground window
+            // Only while the terminal's console window has the keyboard. It stays a top-level
+            // window of conhost (GA_ROOT is itself), so compare with its handle directly.
+            // When Snap itself has the focus, WPF's InputBindings / PreviewKeyDown handle these
+            // keys (and a TextBox keeps Ctrl+Space).
+            var termWnd = _viewModel.Terminal.ShellWindowHandle;
             var fgWnd = GetForegroundWindow();
-            var myWnd = new WindowInteropHelper(this).Handle;
-            if (fgWnd != myWnd && !IsChildOfWindow(fgWnd, myWnd))
+            if (termWnd == IntPtr.Zero
+                || (fgWnd != termWnd && GetAncestor(fgWnd, 2) != termWnd && GetForegroundFocus() != termWnd))
                 return CallNextHookEx(_keyboardHookId, nCode, wParam, lParam);
 
             int vkCode = Marshal.ReadInt32(lParam);
@@ -345,7 +401,8 @@ public partial class MainWindow : Window
             }
             if (vkCode == VK_SPACE && ctrl)
             {
-                Dispatcher.BeginInvoke(() => ToggleCommandPalette());
+                // The console is the foreground window: bring Snap forward so the palette gets the keys.
+                Dispatcher.BeginInvoke(() => { Activate(); ToggleCommandPalette(); });
                 return (IntPtr)1;
             }
         }
@@ -354,13 +411,6 @@ public partial class MainWindow : Window
 
     [DllImport("user32.dll")]
     private static extern IntPtr GetAncestor(IntPtr hwnd, uint gaFlags);
-
-    private bool IsChildOfWindow(IntPtr hwnd, IntPtr parentHwnd)
-    {
-        // GA_ROOT = 2: get the root owner window
-        var root = GetAncestor(hwnd, 2);
-        return root == parentHwnd;
-    }
 
     private void MainWindow_Closing(object? sender, CancelEventArgs e)
     {
@@ -547,11 +597,35 @@ public partial class MainWindow : Window
         }
     }
 
-    // Active pane: MainViewModel owns it; the view only reports the click.
+    // Active pane: MainViewModel owns it; the view only reports the click / keyboard focus.
     private void Pane_PreviewMouseDown(object sender, MouseButtonEventArgs e)
     {
         if (sender is TabPaneControl pane && pane.DataContext is TabPaneViewModel vm)
             _viewModel.ActivePane = vm;
+    }
+
+    private void Pane_PreviewGotKeyboardFocus(object sender, KeyboardFocusChangedEventArgs e)
+    {
+        if (sender is TabPaneControl pane && pane.DataContext is TabPaneViewModel vm)
+            _viewModel.ActivePane = vm;
+    }
+
+    /// <summary>Ctrl+1..4: MainViewModel made the pane active; put the keyboard in its list.</summary>
+    private void FocusPane(TabPaneViewModel pane)
+    {
+        TabPaneControl? view =
+            pane == _viewModel.TopLeftPane ? TopLeftPaneView :
+            pane == _viewModel.TopRightPane ? TopRightPaneView :
+            pane == _viewModel.BottomLeftPane ? BottomLeftPaneView :
+            pane == _viewModel.BottomRightPane ? BottomRightPaneView : null;
+        view?.FocusFileList();
+    }
+
+    private void OnOpenInNewTabRequested(object sender, RoutedEventArgs e)
+    {
+        if (e is OpenInNewTabRequestedEventArgs args)
+            _viewModel.OpenInNewTab(args.From, args.Path, args.Select)
+                .SafeFireAndForget("MainWindow.OpenInNewTab", $"新しいタブで開けません（{args.Path}）");
     }
 
     private void OnTabMoveRequested(object sender, RoutedEventArgs e)
@@ -586,9 +660,17 @@ public partial class MainWindow : Window
             return;
         }
 
-        // Ctrl+Space — command palette toggle is handled by low-level keyboard hook
+        // Ctrl+Space — command palette. Handled on the tunnel so the ListView does not take it;
+        // a focused text box keeps it (IME etc.), except the palette's own input (#14).
+        if (e.Key == Key.Space && Keyboard.Modifiers == ModifierKeys.Control && CanTogglePaletteByKey())
+        {
+            ToggleCommandPalette();
+            e.Handled = true;
+            return;
+        }
 
-        // Ctrl+T — terminal toggle is handled by low-level keyboard hook
+        // Ctrl+T — KeyBinding added in the constructor. While the terminal's console window has
+        // the focus, the low-level hook covers Esc / Ctrl+T / Ctrl+Space instead.
 
         // Escape — close floating panels
         if (e.Key == Key.Escape)
@@ -613,6 +695,11 @@ public partial class MainWindow : Window
     }
 
     // ==================== Command Palette ====================
+
+    /// <summary>Ctrl+Space passes through to a focused text box (IME and other users of the key),
+    /// except the palette's own input, where it closes the palette.</summary>
+    private bool CanTogglePaletteByKey() =>
+        Keyboard.FocusedElement is not TextBox box || box == CommandPaletteInput;
 
     private void ToggleCommandPalette()
     {

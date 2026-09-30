@@ -3,6 +3,7 @@ using System.ComponentModel;
 using System.Diagnostics;
 using System.Windows.Threading;
 using CommunityToolkit.Mvvm.ComponentModel;
+using CommunityToolkit.Mvvm.Input;
 using Snap.Helpers;
 using Snap.Models;
 using Snap.Services;
@@ -175,9 +176,15 @@ public partial class MainViewModel : ObservableObject
     partial void OnActivePaneChanged(TabPaneViewModel? oldValue, TabPaneViewModel? newValue)
     {
         if (oldValue != null)
+        {
             oldValue.PropertyChanged -= OnActivePanePropertyChanged;
+            oldValue.IsActive = false;
+        }
         if (newValue != null)
+        {
             newValue.PropertyChanged += OnActivePanePropertyChanged;
+            newValue.IsActive = true;
+        }
         ActiveTab = newValue?.SelectedTab;
     }
 
@@ -279,12 +286,69 @@ public partial class MainViewModel : ObservableObject
     public Task RefreshPanesShowing(string folder, FilePaneViewModel? except = null) =>
         RefreshPanesShowing([folder], except);
 
+    // ==================== Keyboard commands (#14) ====================
+    // Bound from MainWindow.InputBindings. Work that needs a view (focus, the terminal's
+    // HwndHost) is asked for through the *Requested events and done by MainWindow.
+
+    /// <summary>The view should move keyboard focus into this pane's file list.</summary>
+    public event Action<TabPaneViewModel>? PaneFocusRequested;
+
+    /// <summary>Ctrl+1..4: makes pane 1..4 (TL, TR, BL, BR) active and focuses its list.</summary>
+    [RelayCommand]
+    private void ActivatePane(string? number)
+    {
+        if (!int.TryParse(number, out var n) || n < 1 || n > AllPanes.Count) return;
+        var pane = AllPanes[n - 1];
+        ActivePane = pane;
+        PaneFocusRequested?.Invoke(pane);
+    }
+
+    /// <summary>Ctrl+N: a new tab in the active pane, opened at the current folder.</summary>
+    [RelayCommand]
+    private Task NewTab() => CurrentPane.AddTab(null);
+
+    /// <summary>Ctrl+W: closes the active tab (a pane's last tab stays).</summary>
+    [RelayCommand]
+    private void CloseActiveTab()
+    {
+        var pane = CurrentPane;
+        if (pane.SelectedTab != null)
+            pane.CloseTab(pane.SelectedTab);
+    }
+
+    /// <summary>Ctrl+Tab / Ctrl+Shift+Tab: next / previous tab of the active pane.</summary>
+    [RelayCommand]
+    private void NextTab() => CurrentPane.SelectRelativeTab(1);
+
+    [RelayCommand]
+    private void PreviousTab() => CurrentPane.SelectRelativeTab(-1);
+
+    /// <summary>Alt+Left / Alt+Right / Alt+Up on the active tab.</summary>
+    [RelayCommand]
+    private Task GoBack() => ActiveTab?.GoBack() ?? Task.CompletedTask;
+
+    [RelayCommand]
+    private Task GoForward() => ActiveTab?.GoForward() ?? Task.CompletedTask;
+
+    [RelayCommand]
+    private Task GoUp() => ActiveTab?.GoUp() ?? Task.CompletedTask;
+
+    /// <summary>
+    /// Opens <paramref name="path"/> in a new tab of the pane holding <paramref name="from"/>,
+    /// right after it (folder middle-click / Ctrl+double-click, #14).
+    /// </summary>
+    public Task OpenInNewTab(FilePaneViewModel from, string path, bool select)
+    {
+        var pane = FindPaneOf(from) ?? CurrentPane;
+        return pane.OpenTabAsync(path, select, insertAfter: from);
+    }
+
     // ==================== Command palette (#13) ====================
 
     /// <summary>The palette's app commands. Adding a command = adding one entry here.</summary>
     private IReadOnlyList<PaletteCommand> BuildPaletteCommands() =>
     [
-        new("new tab", "New Tab", "\uE710", () => CurrentPane.AddTab()),
+        new("new tab", "New Tab", "\uE710", () => CurrentPane.AddTab(null)),
         new("close tab", "Close Tab", "\uE711", () =>
         {
             var pane = CurrentPane;

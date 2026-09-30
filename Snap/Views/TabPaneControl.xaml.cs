@@ -34,6 +34,9 @@ public partial class TabPaneControl : UserControl
         DataContextChanged += OnDataContextChanged;
     }
 
+    /// <summary>Moves keyboard focus into the selected tab's file list (Ctrl+1..4, #14).</summary>
+    public void FocusFileList() => FilePane.FocusList();
+
     private void OnDataContextChanged(object sender, DependencyPropertyChangedEventArgs e)
     {
         if (e.OldValue is TabPaneViewModel oldVm)
@@ -171,6 +174,7 @@ public partial class TabPaneControl : UserControl
             AllowDrop = true
         };
         border.MouseLeftButtonDown += TabHeader_MouseLeftButtonDown;
+        border.MouseUp += TabHeader_MouseUp;
         border.MouseRightButtonUp += TabHeader_MouseRightButtonUp;
         border.MouseMove += TabHeader_MouseMove;
         border.DragEnter += TabHeader_DragEnter;
@@ -211,6 +215,17 @@ public partial class TabPaneControl : UserControl
             _tabDragStartPoint = e.GetPosition(this);
             _tabDragSource = border;
             _tabDragInProgress = false;
+        }
+    }
+
+    // Middle-click closes the tab (#14)
+    private void TabHeader_MouseUp(object sender, MouseButtonEventArgs e)
+    {
+        if (e.ChangedButton != MouseButton.Middle) return;
+        if (sender is Border { Tag: FilePaneViewModel tab } && DataContext is TabPaneViewModel paneVm)
+        {
+            paneVm.CloseTab(tab);
+            e.Handled = true;
         }
     }
 
@@ -327,6 +342,29 @@ public partial class TabPaneControl : UserControl
         };
         resetItem.Click += (_, _) => tab.ResetTabHeader();
         menu.Items.Add(resetItem);
+
+        if (DataContext is TabPaneViewModel paneVm)
+        {
+            menu.Items.Add(new Separator());
+
+            var duplicateItem = new MenuItem
+            {
+                Header = "複製",
+                Foreground = new SolidColorBrush(Color.FromRgb(0xE0, 0xE0, 0xE0)),
+            };
+            duplicateItem.Click += (_, _) => paneVm.OpenTabAsync(tab.CurrentPath, select: true, insertAfter: tab)
+                .SafeFireAndForget("TabPane.Duplicate", "タブを複製できません");
+            menu.Items.Add(duplicateItem);
+
+            var closeOthersItem = new MenuItem
+            {
+                Header = "他を閉じる",
+                Foreground = new SolidColorBrush(Color.FromRgb(0xE0, 0xE0, 0xE0)),
+                IsEnabled = paneVm.Tabs.Count > 1,
+            };
+            closeOthersItem.Click += (_, _) => paneVm.CloseOtherTabs(tab);
+            menu.Items.Add(closeOthersItem);
+        }
 
         menu.PlacementTarget = border;
         menu.IsOpen = true;

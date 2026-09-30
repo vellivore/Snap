@@ -65,14 +65,34 @@ public partial class TabPaneViewModel : ObservableObject
         return (tabs, Math.Max(index, 0));
     }
 
+    /// <summary>True while this is MainViewModel.ActivePane (drives the pane's frame colour, #14).
+    /// Set only by MainViewModel.</summary>
+    [ObservableProperty]
+    private bool _isActive;
+
+    /// <summary>
+    /// Opens a new tab showing <paramref name="path"/>, or the selected tab's folder when null
+    /// (#14: a new tab opens where you are, not at C:\). "+" button, Ctrl+N and the palette.
+    /// </summary>
     [RelayCommand]
-    public async Task AddTab()
+    public Task AddTab(string? path) => OpenTabAsync(path, select: true);
+
+    /// <summary>Opens a tab at <paramref name="path"/> (null = the selected tab's folder).</summary>
+    /// <param name="select">Make it the selected tab (false = open in the background).</param>
+    /// <param name="insertAfter">Put it right after this tab; appended when null.</param>
+    public async Task<FilePaneViewModel> OpenTabAsync(string? path, bool select, FilePaneViewModel? insertAfter = null)
     {
-        var tab = new FilePaneViewModel();
+        path ??= SelectedTab?.CurrentPath;
+        var tab = new FilePaneViewModel(path ?? @"C:\");
         if (_usageTracker != null) tab.SetUsageTracker(_usageTracker);
-        Tabs.Add(tab);
-        SelectedTab = tab;
+
+        var at = insertAfter != null ? Tabs.IndexOf(insertAfter) : -1;
+        if (at >= 0) Tabs.Insert(at + 1, tab);
+        else Tabs.Add(tab);
+
+        if (select) SelectedTab = tab;
         await tab.InitializeAsync();
+        return tab;
     }
 
     [RelayCommand]
@@ -90,5 +110,23 @@ public partial class TabPaneViewModel : ObservableObject
         {
             SelectedTab = Tabs[Math.Min(index, Tabs.Count - 1)];
         }
+    }
+
+    /// <summary>Closes every tab except <paramref name="keep"/>, which becomes selected.</summary>
+    public void CloseOtherTabs(FilePaneViewModel keep)
+    {
+        if (!Tabs.Contains(keep)) return;
+        SelectedTab = keep;
+        foreach (var tab in Tabs.Where(t => t != keep).ToList())
+            CloseTab(tab);
+    }
+
+    /// <summary>Selects the next (<paramref name="delta"/> = 1) or previous (-1) tab, wrapping around.</summary>
+    public void SelectRelativeTab(int delta)
+    {
+        if (Tabs.Count == 0) return;
+        var index = SelectedTab != null ? Tabs.IndexOf(SelectedTab) : 0;
+        index = ((index + delta) % Tabs.Count + Tabs.Count) % Tabs.Count;
+        SelectedTab = Tabs[index];
     }
 }

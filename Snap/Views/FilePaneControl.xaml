@@ -2,6 +2,7 @@
              xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
              xmlns:vm="clr-namespace:Snap.ViewModels"
+             xmlns:local="clr-namespace:Snap"
              Focusable="True"
              PreviewKeyDown="UserControl_KeyDown">
     <UserControl.Resources>
@@ -93,7 +94,30 @@
             </Grid>
         </Border>
 
-        <!-- Search Bar removed: search is now in Command Palette (Ctrl+Space / Ctrl+F) -->
+        <!-- Filter bar (Ctrl+Shift+F, #14): narrows this folder's list by name; Esc clears -->
+        <Border Grid.Row="1" Margin="4,0,4,1" Background="#A024242C"
+                BorderBrush="{StaticResource AccentBrush}" BorderThickness="1"
+                Visibility="{Binding IsFilterVisible, Converter={StaticResource BoolToVis}}">
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="Auto"/>
+                    <ColumnDefinition Width="*"/>
+                </Grid.ColumnDefinitions>
+                <TextBlock Grid.Column="0" Text="&#xE71C;" FontFamily="Segoe Fluent Icons"
+                           FontSize="11" Foreground="{StaticResource FgDimBrush}"
+                           VerticalAlignment="Center" Margin="6,0,2,0"/>
+                <TextBox Grid.Column="1" x:Name="FilterTextBox"
+                         Text="{Binding FilterText, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                         PreviewKeyDown="FilterTextBox_PreviewKeyDown"
+                         LostKeyboardFocus="FilterTextBox_LostKeyboardFocus"
+                         Background="Transparent" BorderThickness="0"
+                         Padding="4,1" FontSize="11" VerticalContentAlignment="Center"/>
+                <TextBlock Grid.Column="1" Text="絞り込み（Esc で解除）" FontSize="11"
+                           Foreground="{StaticResource FgDimBrush}" Padding="6,1"
+                           VerticalAlignment="Center" IsHitTestVisible="False"
+                           Visibility="{Binding FilterText, Converter={x:Static local:EmptyToVisibleConverter.Instance}}"/>
+            </Grid>
+        </Border>
 
         <!-- Separator -->
         <Border Grid.Row="2" Background="#30AAAACC"/>
@@ -104,6 +128,9 @@
                   ItemsSource="{Binding Items}"
                   SelectedItem="{Binding SelectedItem, Mode=TwoWay}"
                   MouseDoubleClick="ListView_MouseDoubleClick"
+                  PreviewMouseDown="FileListView_PreviewMouseDown"
+                  IsTextSearchEnabled="True"
+                  TextSearch.TextPath="Name"
                   PreviewMouseLeftButtonDown="FileList_PreviewMouseLeftButtonDown"
                   PreviewMouseMove="FileList_PreviewMouseMove"
                   AllowDrop="True"

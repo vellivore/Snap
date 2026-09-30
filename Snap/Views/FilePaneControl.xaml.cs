@@ -45,6 +45,12 @@ public partial class FilePaneControl : UserControl
         EventManager.RegisterRoutedEvent("RefreshPanesRequested", RoutingStrategy.Bubble,
             typeof(RoutedEventHandler), typeof(FilePaneControl));
 
+    /// <summary>Asks the window to open a folder in a new tab next to this one
+    /// (<see cref="OpenInNewTabRequestedEventArgs"/>); handled by MainViewModel.OpenInNewTab (#14).</summary>
+    public static readonly RoutedEvent OpenInNewTabRequestedEvent =
+        EventManager.RegisterRoutedEvent("OpenInNewTabRequested", RoutingStrategy.Bubble,
+            typeof(RoutedEventHandler), typeof(FilePaneControl));
+
     // Column header display name → sort property mapping
     private static readonly Dictionary<string, string> ColumnMap = new()
     {
@@ -69,6 +75,7 @@ public partial class FilePaneControl : UserControl
         MouseDown += FilePaneControl_MouseDown;
         DataContextChanged += OnDataContextChanged;
         AddHandler(GridViewColumnHeader.ClickEvent, new RoutedEventHandler(ColumnHeader_Click));
+        TrackListFocus();
     }
 
     private FilePaneViewModel? ViewModel => DataContext as FilePaneViewModel;
@@ -112,6 +119,9 @@ public partial class FilePaneControl : UserControl
         }
     }
 
+    // The folder shown before the last CurrentPath change: after going up, it is re-selected.
+    private string? _shownPath;
+
     private void OnDataContextChanged(object sender, DependencyPropertyChangedEventArgs e)
     {
         if (e.OldValue is FilePaneViewModel oldVm)
@@ -121,15 +131,140 @@ public partial class FilePaneControl : UserControl
         {
             newVm.PropertyChanged += OnViewModelPropertyChanged;
             RebuildBreadcrumb(newVm.CurrentPath);
+            _shownPath = newVm.CurrentPath;
+            // Tab switch (Ctrl+Tab etc.): if the list had the focus, it keeps it.
+            if (ListShouldKeepFocus())
+                FocusListAfterLayout(select: null);
         }
     }
 
     private void OnViewModelPropertyChanged(object? sender, PropertyChangedEventArgs e)
     {
-        if (e.PropertyName == nameof(FilePaneViewModel.CurrentPath) && sender is FilePaneViewModel vm)
+        if (sender is not FilePaneViewModel vm) return;
+        if (e.PropertyName == nameof(FilePaneViewModel.CurrentPath))
         {
             RebuildBreadcrumb(vm.CurrentPath);
+            var previous = _shownPath;
+            _shownPath = vm.CurrentPath;
+            // Keyboard navigation (Backspace, Enter, Alt+arrows) must leave the focus in the list:
+            // re-select the folder we came up from (like Explorer), else focus the first entry.
+            if (ListShouldKeepFocus())
+            {
+                var cameFrom = previous != null
+                    && string.Equals(FilePaneViewModel.GetParentPath(previous), vm.CurrentPath, StringComparison.OrdinalIgnoreCase)
+                    ? vm.Items.FirstOrDefault(i => string.Equals(i.FullPath.TrimEnd('\\'), previous.TrimEnd('\\'), StringComparison.OrdinalIgnoreCase))
+                    : null;
+                FocusListAfterLayout(cameFrom, newFolder: true);
+            }
         }
+        else if (e.PropertyName == nameof(FilePaneViewModel.IsFilterVisible) && vm.IsFilterVisible)
+        {
+            Dispatcher.BeginInvoke(System.Windows.Threading.DispatcherPriority.Input, () =>
+            {
+                FilterTextBox.Focus();
+                FilterTextBox.SelectAll();
+            });
+        }
+    }
+
+    /// <summary>
+    /// True when the keyboard focus is in this pane's list, or was lost because the focused row
+    /// went away with the old items (focus is then nowhere / on the window). A text box or
+    /// another pane/tree keeps its focus.
+    /// </summary>
+    private bool ListShouldKeepFocus()
+    {
+        if (FileListView.IsKeyboardFocusWithin) return true;
+        var focused = Keyboard.FocusedElement as DependencyObject;
+        return (focused == null || focused is Window) && _listOwnsFocus;
+    }
+
+    // True from the moment the list (or a row) gets the keyboard focus until the focus moves
+    // somewhere else on purpose. A focused row that disappears with the old items does not
+    // clear it (its LostKeyboardFocus no longer reaches the list).
+    private bool _listOwnsFocus;
+
+    private void TrackListFocus()
+    {
+        FileListView.GotKeyboardFocus += (_, _) => _listOwnsFocus = true;
+        FileListView.LostKeyboardFocus += (_, e) =>
+        {
+            if (e.NewFocus is DependencyObject d && d is not Window
+                && !(d is Visual v && FileListView.IsAncestorOf(v)))
+                _listOwnsFocus = false;
+        };
+    }
+
+    /// <summary>Focuses the list: <paramref name="select"/> selected and focused, else the
+    /// selected row, else the first row (focused, not selected), else the list itself.</summary>
+    public void FocusList() => FocusListAfterLayout(select: null);
+
+    /// <param name="newFolder">The list now shows another folder: start with nothing selected
+    /// except <paramref name="select"/>. Done after layout, because a recycled row that was
+    /// selected re-selects whatever item it is given next.</param>
+    private void FocusListAfterLayout(FileItem? select, bool newFolder = false)
+    {
+        Dispatcher.BeginInvoke(System.Windows.Threading.DispatcherPriority.Loaded, () =>
+        {
+            try
+            {
+                if (newFolder)
+                {
+                    FileListView.UpdateLayout();
+                    FileListView.UnselectAll();
+                }
+                if (select != null)
+                    FileListView.SelectedItem = select;
+                var hadSelection = FileListView.SelectedItems.Count > 0;
+                var target = select ?? FileListView.SelectedItem as FileItem
+                             ?? (FileListView.Items.Count > 0 ? FileListView.Items[0] as FileItem : null);
+                if (target == null)
+                {
+                    FileListView.Focus();
+                    return;
+                }
+                FileListView.ScrollIntoView(target);
+                FileListView.UpdateLayout();
+                if (FileListView.ItemContainerGenerator.ContainerFromItem(target) is ListViewItem row)
+                {
+                    row.Focus();
+                    // ListBox selects a row that gets the focus from inside the list
+                    // (OnGotKeyboardFocus → MakeSingleSelection). Nothing selected stays nothing
+                    // selected, as in Explorer: the row only has the focus.
+                    if (!hadSelection)
+                        FileListView.UnselectAll();
+                }
+                else
+                    FileListView.Focus();
+            }
+            catch (Exception ex) { Log.Warn("FilePane.FocusList", "focus not restored", ex); }
+        });
+    }
+
+    // ==================== Filter bar (Ctrl+Shift+F, #14) ====================
+
+    private void FilterTextBox_PreviewKeyDown(object sender, KeyEventArgs e)
+    {
+        switch (e.Key)
+        {
+            case Key.Escape:
+                ViewModel?.ClearFilter();
+                FocusList();
+                e.Handled = true;
+                break;
+            case Key.Enter:
+            case Key.Down:
+                FocusList();
+                e.Handled = true;
+                break;
+        }
+    }
+
+    private void FilterTextBox_LostKeyboardFocus(object sender, KeyboardFocusChangedEventArgs e)
+    {
+        // An empty filter bar has nothing to show; hide it when the user leaves it.
+        if (ViewModel is { } vm && string.IsNullOrEmpty(vm.FilterText))
+            vm.IsFilterVisible = false;
     }
 
     private void RebuildBreadcrumb(string path)
@@ -418,6 +553,12 @@ public partial class FilePaneControl : UserControl
 
         if (listViewItem != null && listViewItem.Content is FileItem item)
         {
+            if (item.IsDirectory && Keyboard.Modifiers == ModifierKeys.Control)
+            {
+                RequestOpenInNewTab(item.FullPath, select: true);
+                e.Handled = true;
+                return;
+            }
             if (ViewModel is { } vm)
             {
                 await vm.OnItemDoubleClicked(item);
@@ -425,24 +566,26 @@ public partial class FilePaneControl : UserControl
         }
         else if (ViewModel is { } vm)
         {
-            if (vm.CurrentPath == FilePaneViewModel.PcViewPath)
-            {
-                // Already at PC view, do nothing
-            }
-            else
-            {
-                var parent = Directory.GetParent(vm.CurrentPath);
-                if (parent != null)
-                {
-                    await vm.NavigateToAsync(parent.FullName);
-                }
-                else
-                {
-                    // At drive root (e.g. C:\) — go up to PC view
-                    await vm.NavigateToAsync(FilePaneViewModel.PcViewPath);
-                }
-            }
+            // Blank area: go up (drive root → PC view; nothing above the PC view)
+            await vm.GoUp();
         }
+    }
+
+    // Middle-click on a folder: open it in a new tab in the background (like a browser link).
+    private void FileListView_PreviewMouseDown(object sender, MouseButtonEventArgs e)
+    {
+        if (e.ChangedButton != MouseButton.Middle) return;
+        if (FindAncestor<ListViewItem>(e.OriginalSource as DependencyObject)?.Content is FileItem { IsDirectory: true } folder)
+        {
+            RequestOpenInNewTab(folder.FullPath, select: false);
+            e.Handled = true;
+        }
+    }
+
+    private void RequestOpenInNewTab(string path, bool select)
+    {
+        if (ViewModel is { } vm)
+            RaiseEvent(new OpenInNewTabRequestedEventArgs(OpenInNewTabRequestedEvent, this, vm, path, select));
     }
 
     private async void UserControl_KeyDown(object sender, KeyEventArgs e)
@@ -474,6 +617,17 @@ public partial class FilePaneControl : UserControl
             return;
         }
 
+        // Ctrl+Shift+F → filter bar for this folder (#14)
+        if (e.Key == Key.F && Keyboard.Modifiers == (ModifierKeys.Control | ModifierKeys.Shift))
+        {
+            vm.ShowFilter();
+            // Already shown (IsFilterVisible unchanged): just go back to it.
+            FilterTextBox.Focus();
+            FilterTextBox.SelectAll();
+            e.Handled = true;
+            return;
+        }
+
         bool isTextBoxFocused = e.OriginalSource is TextBox;
 
         if (e.Key == Key.F5)
@@ -484,6 +638,45 @@ public partial class FilePaneControl : UserControl
         }
 
         if (isTextBoxFocused) return;
+
+        // Backspace → up
+        if (e.Key == Key.Back && Keyboard.Modifiers == ModifierKeys.None)
+        {
+            e.Handled = true;
+            await vm.GoUp();
+            return;
+        }
+
+        // Alt+Left / Alt+Right / Alt+Up. Window-wide InputBindings cover them elsewhere, but the
+        // ListView consumes Alt+Left/Right before they bubble up, so the list handles them here.
+        if (e.Key == Key.System && Keyboard.Modifiers == ModifierKeys.Alt
+            && e.SystemKey is Key.Left or Key.Right or Key.Up)
+        {
+            e.Handled = true;
+            await (e.SystemKey switch
+            {
+                Key.Left => vm.GoBack(),
+                Key.Right => vm.GoForward(),
+                _ => vm.GoUp(),
+            });
+            return;
+        }
+
+        // Alt+Enter → Properties
+        if (e.Key == Key.System && e.SystemKey == Key.Enter && Keyboard.Modifiers == ModifierKeys.Alt)
+        {
+            e.Handled = true;
+            vm.ShowProperties(FileListView.SelectedItems.Count > 0 ? vm.SelectedItem : null);
+            return;
+        }
+
+        // Ctrl+Shift+C → full paths as text
+        if (e.Key == Key.C && Keyboard.Modifiers == (ModifierKeys.Control | ModifierKeys.Shift))
+        {
+            vm.CopyFullPaths(FileListView.SelectedItems);
+            e.Handled = true;
+            return;
+        }
 
         if (e.Key == Key.F2)
         {
@@ -520,10 +713,10 @@ public partial class FilePaneControl : UserControl
             return;
         }
 
-        if (e.Key == Key.Enter)
+        if (e.Key == Key.Enter && Keyboard.Modifiers == ModifierKeys.None)
         {
-            await vm.OpenItem(vm.SelectedItem);
             e.Handled = true;
+            await vm.OpenSelection(FileListView.SelectedItems);
             return;
         }
     }
@@ -566,6 +759,9 @@ public partial class FilePaneControl : UserControl
         if (window == null) return;
         var hwnd = new WindowInteropHelper(window).Handle;
         if (hwnd == IntPtr.Zero) return;
+
+        // Shift+right-click adds the extended verbs (e.g. "Open in new process", "Open PowerShell window here")
+        uint extraFlags = (Keyboard.Modifiers & ModifierKeys.Shift) != 0 ? ShellNativeMethods.CMF_EXTENDEDVERBS : 0;
 
         var screenPos = PointToScreen(e.GetPosition(this));
         int x = (int)screenPos.X;
@@ -638,10 +834,12 @@ public partial class FilePaneControl : UserControl
 
             if (paths != null)
                 await ShellContextMenu.ShowContextMenuAsync(hwnd, paths, x, y,
-                    onRefresh: onRefresh, customItems: customItems, onMenuReady: onMenuReady);
+                    onRefresh: onRefresh, customItems: customItems, onMenuReady: onMenuReady,
+                    extraFlags: extraFlags);
             else
                 await ShellContextMenu.ShowBackgroundMenuAsync(hwnd, folderPath!, x, y,
-                    onRefresh: onRefresh, customItems: customItems, onMenuReady: onMenuReady);
+                    onRefresh: onRefresh, customItems: customItems, onMenuReady: onMenuReady,
+                    extraFlags: extraFlags);
         }
         catch (Exception ex)
         {
@@ -925,4 +1123,14 @@ public sealed class RefreshPanesRequestedEventArgs(
 {
     public IReadOnlyList<string> Folders { get; } = folders;
     public FilePaneViewModel? Except { get; } = except;
+}
+
+/// <summary>Open <see cref="Path"/> in a new tab next to <see cref="From"/> (#14).</summary>
+public sealed class OpenInNewTabRequestedEventArgs(
+    RoutedEvent routedEvent, object source, FilePaneViewModel from, string path, bool select)
+    : RoutedEventArgs(routedEvent, source)
+{
+    public FilePaneViewModel From { get; } = from;
+    public string Path { get; } = path;
+    public bool Select { get; } = select;
 }

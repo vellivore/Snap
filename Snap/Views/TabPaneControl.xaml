@@ -4,6 +4,19 @@
              xmlns:vm="clr-namespace:Snap.ViewModels"
              xmlns:views="clr-namespace:Snap.Views">
 
+    <!-- Active pane frame (#14): bound to TabPaneViewModel.IsActive, which MainViewModel sets
+         from ActivePane. Always 1px so switching panes does not shift the layout. -->
+    <Border BorderThickness="1" CornerRadius="2">
+        <Border.Style>
+            <Style TargetType="Border">
+                <Setter Property="BorderBrush" Value="Transparent"/>
+                <Style.Triggers>
+                    <DataTrigger Binding="{Binding IsActive}" Value="True">
+                        <Setter Property="BorderBrush" Value="{StaticResource AccentBrush}"/>
+                    </DataTrigger>
+                </Style.Triggers>
+            </Style>
+        </Border.Style>
     <Grid Background="Transparent" x:Name="RootGrid"
           AllowDrop="True"
           PreviewDragEnter="Grid_TabDragEnter"
@@ -20,7 +33,8 @@
         </Border>
 
         <!-- Active Tab Content -->
-        <views:FilePaneControl Grid.Row="1"
+        <views:FilePaneControl Grid.Row="1" x:Name="FilePane"
                                DataContext="{Binding SelectedTab}"/>
     </Grid>
+    </Border>
 </UserControl>

@@ -36,14 +36,16 @@ internal static class ShellContextMenu
     /// Shows native shell context menu for one or more files/folders.
     /// Shell COM work runs on the worker STA; the popup itself is tracked on the UI thread.
     /// </summary>
+    /// <param name="extraFlags">Added to the QueryContextMenu flags, e.g.
+    /// <see cref="ShellNativeMethods.CMF_EXTENDEDVERBS"/> for Shift+right-click (#14).</param>
     public static Task ShowContextMenuAsync(IntPtr hwnd, string[] paths, int x, int y,
         Action? onRefresh = null, List<SnapMenuItem>? customItems = null,
-        Action? onMenuReady = null)
+        Action? onMenuReady = null, uint extraFlags = 0)
     {
         if (paths.Length == 0) return Task.CompletedTask;
         return ShowCoreAsync("item", hwnd, x, y, onRefresh, customItems, onMenuReady,
             () => PrepareItemMenu(hwnd, paths,
-                ShellNativeMethods.CMF_EXPLORE | ShellNativeMethods.CMF_CANRENAME));
+                ShellNativeMethods.CMF_EXPLORE | ShellNativeMethods.CMF_CANRENAME | extraFlags));
     }
 
     /// <summary>
@@ -51,10 +53,10 @@ internal static class ShellContextMenu
     /// </summary>
     public static Task ShowBackgroundMenuAsync(IntPtr hwnd, string folderPath, int x, int y,
         Action? onRefresh = null, List<SnapMenuItem>? customItems = null,
-        Action? onMenuReady = null)
+        Action? onMenuReady = null, uint extraFlags = 0)
     {
         return ShowCoreAsync("background", hwnd, x, y, onRefresh, customItems, onMenuReady,
-            () => PrepareBackgroundMenu(hwnd, folderPath, ShellNativeMethods.CMF_EXPLORE));
+            () => PrepareBackgroundMenu(hwnd, folderPath, ShellNativeMethods.CMF_EXPLORE | extraFlags));
     }
 
     // ==================== Warm-up (called on the worker) ====================

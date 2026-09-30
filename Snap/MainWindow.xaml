@@ -13,6 +13,22 @@
         PreviewKeyDown="Window_PreviewKeyDown"
         PreviewKeyUp="Window_PreviewKeyUp">
 
+    <!-- Window-wide shortcuts (#14). List-only keys (Backspace, Enter, Alt+Enter, Ctrl+Shift+C/F)
+         are in FilePaneControl; Ctrl+Space / Ctrl+T are added in code (they drive the view). -->
+    <Window.InputBindings>
+        <KeyBinding Gesture="Ctrl+1" Command="{Binding ActivatePaneCommand}" CommandParameter="1"/>
+        <KeyBinding Gesture="Ctrl+2" Command="{Binding ActivatePaneCommand}" CommandParameter="2"/>
+        <KeyBinding Gesture="Ctrl+3" Command="{Binding ActivatePaneCommand}" CommandParameter="3"/>
+        <KeyBinding Gesture="Ctrl+4" Command="{Binding ActivatePaneCommand}" CommandParameter="4"/>
+        <KeyBinding Gesture="Ctrl+N" Command="{Binding NewTabCommand}"/>
+        <KeyBinding Gesture="Ctrl+W" Command="{Binding CloseActiveTabCommand}"/>
+        <KeyBinding Gesture="Ctrl+Tab" Command="{Binding NextTabCommand}"/>
+        <KeyBinding Gesture="Ctrl+Shift+Tab" Command="{Binding PreviousTabCommand}"/>
+        <KeyBinding Gesture="Alt+Left" Command="{Binding GoBackCommand}"/>
+        <KeyBinding Gesture="Alt+Right" Command="{Binding GoForwardCommand}"/>
+        <KeyBinding Gesture="Alt+Up" Command="{Binding GoUpCommand}"/>
+    </Window.InputBindings>
+
     <Border Background="#BF181820" CornerRadius="8" BorderBrush="#50FFFFFF" BorderThickness="1">
         <Grid>
             <Grid.RowDefinitions>
@@ -90,8 +106,10 @@
 
                     <!-- Top-Left Pane -->
                     <views:TabPaneControl Grid.Row="0" Grid.Column="0"
+                                          x:Name="TopLeftPaneView"
                                           DataContext="{Binding TopLeftPane}"
-                                          PreviewMouseDown="Pane_PreviewMouseDown"/>
+                                          PreviewMouseDown="Pane_PreviewMouseDown"
+                                          PreviewGotKeyboardFocus="Pane_PreviewGotKeyboardFocus"/>
 
                     <!-- Vertical Splitter (top row) -->
                     <GridSplitter Grid.Row="0" Grid.Column="1"
@@ -101,8 +119,10 @@
 
                     <!-- Top-Right Pane -->
                     <views:TabPaneControl Grid.Row="0" Grid.Column="2"
+                                          x:Name="TopRightPaneView"
                                           DataContext="{Binding TopRightPane}"
-                                          PreviewMouseDown="Pane_PreviewMouseDown"/>
+                                          PreviewMouseDown="Pane_PreviewMouseDown"
+                                          PreviewGotKeyboardFocus="Pane_PreviewGotKeyboardFocus"/>
 
                     <!-- Horizontal Splitter -->
                     <GridSplitter Grid.Row="1" Grid.Column="0" Grid.ColumnSpan="3"
@@ -114,8 +134,10 @@
 
                     <!-- Bottom-Left Pane -->
                     <views:TabPaneControl Grid.Row="2" Grid.Column="0"
+                                          x:Name="BottomLeftPaneView"
                                           DataContext="{Binding BottomLeftPane}"
-                                          PreviewMouseDown="Pane_PreviewMouseDown"/>
+                                          PreviewMouseDown="Pane_PreviewMouseDown"
+                                          PreviewGotKeyboardFocus="Pane_PreviewGotKeyboardFocus"/>
 
                     <!-- Vertical Splitter (bottom row) -->
                     <GridSplitter Grid.Row="2" Grid.Column="1"
@@ -125,8 +147,10 @@
 
                     <!-- Bottom-Right Pane -->
                     <views:TabPaneControl Grid.Row="2" Grid.Column="2"
+                                          x:Name="BottomRightPaneView"
                                           DataContext="{Binding BottomRightPane}"
-                                          PreviewMouseDown="Pane_PreviewMouseDown"/>
+                                          PreviewMouseDown="Pane_PreviewMouseDown"
+                                          PreviewGotKeyboardFocus="Pane_PreviewGotKeyboardFocus"/>
                 </Grid>
             </Grid>
 

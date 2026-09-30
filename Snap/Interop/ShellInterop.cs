@@ -161,6 +161,7 @@ internal static class ShellNativeMethods
     internal const uint CMF_NORMAL = 0x00000000;
     internal const uint CMF_EXPLORE = 0x00000004;
     internal const uint CMF_CANRENAME = 0x00000010;
+    internal const uint CMF_EXTENDEDVERBS = 0x00000100;
     internal const uint TPM_RETURNCMD = 0x0100;
     internal const uint TPM_NONOTIFY = 0x0080;
     internal const uint TPM_LEFTALIGN = 0x0000;

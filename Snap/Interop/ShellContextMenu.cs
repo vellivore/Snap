@@ -1,5 +1,6 @@
 using System.IO;
 using System.Runtime.InteropServices;
+using System.Threading;
 using System.Windows;
 using System.Windows.Interop;
 
@@ -10,78 +11,122 @@ internal record SnapMenuItem(string Label, Action Handler);
 
 internal static class ShellContextMenu
 {
+    /// <summary>Timeout for forwarding owner-draw / submenu messages to the worker.</summary>
+    private static readonly TimeSpan MenuMsgTimeout = TimeSpan.FromSeconds(3);
+
+    private static int _showCount;
+
+    /// <summary>
+    /// Menu state built on <see cref="ShellMenuWorker"/>. The COM members must only be
+    /// touched on the worker thread; the HMENU and PIDLs are thread-agnostic.
+    /// </summary>
+    private sealed class PreparedMenu
+    {
+        public IShellFolder? ShellFolder;
+        public IContextMenu? ContextMenu;
+        public IContextMenu2? ContextMenu2;
+        public IContextMenu3? ContextMenu3;
+        public IntPtr HMenu;
+        public readonly List<IntPtr> Pidls = new();
+        public string Directory = "";
+        public Dictionary<uint, Action> SnapCmdIds = new();
+    }
+
     /// <summary>
     /// Shows native shell context menu for one or more files/folders.
+    /// Shell COM work runs on the worker STA; the popup itself is tracked on the UI thread.
     /// </summary>
-    public static void ShowContextMenu(IntPtr hwnd, string[] paths, int x, int y,
+    public static Task ShowContextMenuAsync(IntPtr hwnd, string[] paths, int x, int y,
         Action? onRefresh = null, List<SnapMenuItem>? customItems = null,
         Action? onMenuReady = null)
     {
-        if (paths.Length == 0) return;
+        if (paths.Length == 0) return Task.CompletedTask;
+        return ShowCoreAsync("item", hwnd, x, y, onRefresh, customItems, onMenuReady,
+            () => PrepareItemMenu(hwnd, paths,
+                ShellNativeMethods.CMF_EXPLORE | ShellNativeMethods.CMF_CANRENAME));
+    }
 
-        var pidls = new List<IntPtr>();
-        IntPtr parentFolder = IntPtr.Zero;
-        IShellFolder? shellFolder = null;
-        IntPtr hMenu = IntPtr.Zero;
-        IContextMenu? contextMenu = null;
-        HwndSource? hwndSource = null;
-        HwndSourceHook? hook = null;
+    /// <summary>
+    /// Shows native shell background context menu for a folder (right-click on empty space).
+    /// </summary>
+    public static Task ShowBackgroundMenuAsync(IntPtr hwnd, string folderPath, int x, int y,
+        Action? onRefresh = null, List<SnapMenuItem>? customItems = null,
+        Action? onMenuReady = null)
+    {
+        return ShowCoreAsync("background", hwnd, x, y, onRefresh, customItems, onMenuReady,
+            () => PrepareBackgroundMenu(hwnd, folderPath, ShellNativeMethods.CMF_EXPLORE));
+    }
 
+    // ==================== Warm-up (called on the worker) ====================
+
+    internal static void WarmUpItemMenu(string path)
+    {
+        var pm = PrepareItemMenu(IntPtr.Zero, new[] { path },
+            ShellNativeMethods.CMF_EXPLORE | ShellNativeMethods.CMF_CANRENAME);
+        if (pm != null) ReleaseOnWorker(pm);
+    }
+
+    internal static void WarmUpBackgroundMenu(string folderPath)
+    {
+        var pm = PrepareBackgroundMenu(IntPtr.Zero, folderPath, ShellNativeMethods.CMF_EXPLORE);
+        if (pm != null) ReleaseOnWorker(pm);
+    }
+
+    internal static void TimingLog(string message)
+    {
+        var line = $"[Snap.ShellMenu] {DateTime.Now:HH:mm:ss.fff} {message}";
+        System.Diagnostics.Debug.WriteLine(line);
+        System.Diagnostics.Trace.WriteLine(line);
         try
         {
-            // Get parent folder - use first path's parent
-            var parentPath = Path.GetDirectoryName(paths[0]);
-            if (parentPath == null) return;
+            var logPath = Environment.GetEnvironmentVariable("SNAP_MENU_TIMING_LOG");
+            if (!string.IsNullOrEmpty(logPath))
+                File.AppendAllText(logPath, line + Environment.NewLine);
+        }
+        catch { }
+    }
 
-            // Get IShellFolder for parent
-            shellFolder = GetShellFolder(parentPath);
-            if (shellFolder == null) return;
+    // ==================== Core ====================
 
-            // Parse child PIDLs
-            foreach (var path in paths)
+    private static async Task ShowCoreAsync(string kind, IntPtr hwnd, int x, int y,
+        Action? onRefresh, List<SnapMenuItem>? customItems, Action? onMenuReady,
+        Func<PreparedMenu?> prepare)
+    {
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        int showIndex = Interlocked.Increment(ref _showCount);
+        var worker = ShellMenuWorker.Instance;
+
+        // ---- Phase A (worker): build IContextMenu + HMENU + Snap items ----
+        PreparedMenu? pm;
+        try
+        {
+            pm = await worker.InvokeAsync(() =>
             {
-                var childName = Path.GetFileName(path);
-                if (string.IsNullOrEmpty(childName)) childName = path; // root drives
+                var p = prepare();
+                if (p != null)
+                {
+                    try { p.SnapCmdIds = AppendSnapItems(p.HMenu, customItems); }
+                    catch { }
+                }
+                return p;
+            });
+        }
+        catch
+        {
+            return;
+        }
+        if (pm == null) return;
 
-                uint eaten = 0;
-                uint attrs = 0;
-                shellFolder.ParseDisplayName(IntPtr.Zero, IntPtr.Zero, childName,
-                    out eaten, out var childPidl, ref attrs);
-
-                if (childPidl != IntPtr.Zero)
-                    pidls.Add(childPidl);
-            }
-
-            if (pidls.Count == 0) return;
-
-            // Get IContextMenu
-            var pidlArray = pidls.ToArray();
-            var iid = ShellNativeMethods.IID_IContextMenu;
-            shellFolder.GetUIObjectOf(hwnd, (uint)pidlArray.Length, pidlArray,
-                ref iid, IntPtr.Zero, out var contextMenuPtr);
-
-            if (contextMenuPtr == IntPtr.Zero) return;
-
-            contextMenu = (IContextMenu)Marshal.GetObjectForIUnknown(contextMenuPtr);
-            Marshal.Release(contextMenuPtr);
-
-            // Create and populate menu
-            hMenu = ShellNativeMethods.CreatePopupMenu();
-            if (hMenu == IntPtr.Zero) return;
-
-            contextMenu.QueryContextMenu(hMenu,
-                0, ShellNativeMethods.FIRST_CMD_ID, ShellNativeMethods.LAST_CMD_ID,
-                ShellNativeMethods.CMF_EXPLORE | ShellNativeMethods.CMF_CANRENAME);
-
-            // Add Snap custom items
-            var snapCmdIds = AppendSnapItems(hMenu, customItems);
-
-            // Notify caller that menu is ready (e.g. to restore cursor)
+        HwndSource? hwndSource = null;
+        HwndSourceHook? hook = null;
+        try
+        {
+            // ---- Phase B (UI): track the popup, owned by the pane's window ----
             onMenuReady?.Invoke();
+            TimingLog($"{kind} menu #{showIndex}: ready in {sw.ElapsedMilliseconds} ms");
 
-            // Hook WndProc for IContextMenu2/3 and to suppress OLE drag-drop during menu
-            var cm2 = contextMenu as IContextMenu2;
-            var cm3 = contextMenu as IContextMenu3;
+            var cm2 = pm.ContextMenu2;
+            var cm3 = pm.ContextMenu3;
             hwndSource = HwndSource.FromHwnd(hwnd);
             hook = (IntPtr h, int msg, IntPtr wParam, IntPtr lParam, ref bool handled) =>
             {
@@ -95,26 +140,36 @@ internal static class ShellContextMenu
                     return IntPtr.Zero;
                 }
 
+                // IContextMenu2/3 messages are forwarded to the worker (UI -> worker only).
                 if (umsg == ShellNativeMethods.WM_MENUCHAR && cm3 != null)
                 {
-                    cm3.HandleMenuMsg2(umsg, wParam, lParam, out var result);
-                    handled = true;
-                    return result;
+                    if (worker.TryInvoke(() =>
+                        {
+                            cm3.HandleMenuMsg2(umsg, wParam, lParam, out var r);
+                            return r;
+                        }, MenuMsgTimeout, out var result))
+                    {
+                        handled = true;
+                        return result;
+                    }
+                    return IntPtr.Zero;
                 }
                 if ((umsg == ShellNativeMethods.WM_INITMENUPOPUP ||
                      umsg == ShellNativeMethods.WM_DRAWITEM ||
                      umsg == ShellNativeMethods.WM_MEASUREITEM) && cm2 != null)
                 {
-                    cm2.HandleMenuMsg(umsg, wParam, lParam);
-                    handled = true;
+                    if (worker.TryInvoke(() => cm2.HandleMenuMsg(umsg, wParam, lParam),
+                            MenuMsgTimeout, out _))
+                        handled = true;
                 }
                 return IntPtr.Zero;
             };
             hwndSource?.AddHook(hook);
 
-            // Show menu and get selection
-            int cmd = ShellNativeMethods.TrackPopupMenuEx(hMenu,
-                ShellNativeMethods.TPM_RETURNCMD | ShellNativeMethods.TPM_NONOTIFY | ShellNativeMethods.TPM_LEFTALIGN,
+            // No TPM_NONOTIFY: it suppresses WM_INITMENUPOPUP, which IContextMenu2 needs to
+            // populate dynamic submenus such as "New". TPM_RETURNCMD still prevents WM_COMMAND.
+            int cmd = ShellNativeMethods.TrackPopupMenuEx(pm.HMenu,
+                ShellNativeMethods.TPM_RETURNCMD | ShellNativeMethods.TPM_LEFTALIGN,
                 x, y, hwnd, IntPtr.Zero);
 
             // Remove hook before invoking command
@@ -124,17 +179,19 @@ internal static class ShellContextMenu
                 hook = null;
             }
 
+            // ---- Phase C: execute the selection ----
             if (cmd > 0)
             {
-                // Check if it's a Snap custom item
-                if (snapCmdIds.TryGetValue((uint)cmd, out var snapAction))
+                if (pm.SnapCmdIds.TryGetValue((uint)cmd, out var snapAction))
                 {
-                    snapAction.Invoke();
+                    snapAction.Invoke(); // Snap item: UI thread
                 }
                 else if (cmd >= ShellNativeMethods.FIRST_CMD_ID && cmd <= ShellNativeMethods.LAST_CMD_ID)
                 {
-                    // Shell command
-                    InvokeShellCommand(contextMenu, cmd, parentPath, hwnd, x, y);
+                    // Shell item: InvokeCommand on the worker, then refresh on the UI.
+                    var cm = pm.ContextMenu!;
+                    var dir = pm.Directory;
+                    await worker.InvokeAsync(() => InvokeShellCommand(cm, cmd, dir, hwnd, x, y));
                     onRefresh?.Invoke();
                 }
             }
@@ -146,127 +203,143 @@ internal static class ShellContextMenu
             if (hook != null && hwndSource != null)
                 hwndSource.RemoveHook(hook);
 
-            if (hMenu != IntPtr.Zero)
-                ShellNativeMethods.DestroyMenu(hMenu);
-
-            foreach (var pidl in pidls)
-                ShellNativeMethods.CoTaskMemFree(pidl);
-
-            if (contextMenu != null)
-                Marshal.FinalReleaseComObject(contextMenu);
-
-            if (shellFolder != null)
-                Marshal.FinalReleaseComObject(shellFolder);
+            // DestroyMenu / PIDL free are thread-agnostic; COM release must happen on the worker.
+            var toRelease = pm;
+            try
+            {
+                if (worker.Dispatcher.HasShutdownStarted)
+                    ReleaseHandlesOnly(toRelease);
+                else
+                    _ = worker.Dispatcher.BeginInvoke(() => ReleaseOnWorker(toRelease));
+            }
+            catch
+            {
+                ReleaseHandlesOnly(toRelease);
+            }
         }
     }
 
-    /// <summary>
-    /// Shows native shell background context menu for a folder (right-click on empty space).
-    /// </summary>
-    public static void ShowBackgroundMenu(IntPtr hwnd, string folderPath, int x, int y,
-        Action? onRefresh = null, List<SnapMenuItem>? customItems = null,
-        Action? onMenuReady = null)
-    {
-        IShellFolder? shellFolder = null;
-        IntPtr hMenu = IntPtr.Zero;
-        IContextMenu? contextMenu = null;
-        HwndSource? hwndSource = null;
-        HwndSourceHook? hook = null;
+    // ==================== Worker-side preparation ====================
 
+    private static PreparedMenu? PrepareItemMenu(IntPtr hwnd, string[] paths, uint flags)
+    {
+        var pm = new PreparedMenu();
         try
         {
-            shellFolder = GetShellFolder(folderPath);
-            if (shellFolder == null) return;
+            // Get parent folder - use first path's parent
+            var parentPath = Path.GetDirectoryName(paths[0]);
+            if (parentPath == null) { ReleaseOnWorker(pm); return null; }
+            pm.Directory = parentPath;
+
+            pm.ShellFolder = GetShellFolder(parentPath);
+            if (pm.ShellFolder == null) { ReleaseOnWorker(pm); return null; }
+
+            // Parse child PIDLs
+            foreach (var path in paths)
+            {
+                var childName = Path.GetFileName(path);
+                if (string.IsNullOrEmpty(childName)) childName = path; // root drives
+
+                uint eaten = 0;
+                uint attrs = 0;
+                pm.ShellFolder.ParseDisplayName(IntPtr.Zero, IntPtr.Zero, childName,
+                    out eaten, out var childPidl, ref attrs);
+
+                if (childPidl != IntPtr.Zero)
+                    pm.Pidls.Add(childPidl);
+            }
+            if (pm.Pidls.Count == 0) { ReleaseOnWorker(pm); return null; }
+
+            var pidlArray = pm.Pidls.ToArray();
+            var iid = ShellNativeMethods.IID_IContextMenu;
+            pm.ShellFolder.GetUIObjectOf(hwnd, (uint)pidlArray.Length, pidlArray,
+                ref iid, IntPtr.Zero, out var contextMenuPtr);
+            if (contextMenuPtr == IntPtr.Zero) { ReleaseOnWorker(pm); return null; }
+
+            pm.ContextMenu = (IContextMenu)Marshal.GetObjectForIUnknown(contextMenuPtr);
+            Marshal.Release(contextMenuPtr);
+
+            return FinishPrepare(pm, flags);
+        }
+        catch
+        {
+            ReleaseOnWorker(pm);
+            return null;
+        }
+    }
+
+    private static PreparedMenu? PrepareBackgroundMenu(IntPtr hwnd, string folderPath, uint flags)
+    {
+        var pm = new PreparedMenu { Directory = folderPath };
+        try
+        {
+            pm.ShellFolder = GetShellFolder(folderPath);
+            if (pm.ShellFolder == null) { ReleaseOnWorker(pm); return null; }
 
             // Get background context menu via CreateViewObject
             var iid = ShellNativeMethods.IID_IContextMenu;
-            shellFolder.CreateViewObject(hwnd, ref iid, out var contextMenuPtr);
+            pm.ShellFolder.CreateViewObject(hwnd, ref iid, out var contextMenuPtr);
+            if (contextMenuPtr == IntPtr.Zero) { ReleaseOnWorker(pm); return null; }
 
-            if (contextMenuPtr == IntPtr.Zero) return;
-
-            contextMenu = (IContextMenu)Marshal.GetObjectForIUnknown(contextMenuPtr);
+            pm.ContextMenu = (IContextMenu)Marshal.GetObjectForIUnknown(contextMenuPtr);
             Marshal.Release(contextMenuPtr);
 
-            hMenu = ShellNativeMethods.CreatePopupMenu();
-            if (hMenu == IntPtr.Zero) return;
-
-            contextMenu.QueryContextMenu(hMenu,
-                0, ShellNativeMethods.FIRST_CMD_ID, ShellNativeMethods.LAST_CMD_ID,
-                ShellNativeMethods.CMF_EXPLORE);
-
-            var snapCmdIds = AppendSnapItems(hMenu, customItems);
-
-            // Notify caller that menu is ready
-            onMenuReady?.Invoke();
-
-            // Hook WndProc for IContextMenu2/3 and to suppress OLE drag-drop during menu
-            var cm2 = contextMenu as IContextMenu2;
-            var cm3 = contextMenu as IContextMenu3;
-            hwndSource = HwndSource.FromHwnd(hwnd);
-            hook = (IntPtr h, int msg, IntPtr wParam, IntPtr lParam, ref bool handled) =>
-            {
-                uint umsg = (uint)msg;
-                if (umsg == 0x0233 || umsg == 0x0049)
-                {
-                    handled = true;
-                    return IntPtr.Zero;
-                }
-                if (umsg == ShellNativeMethods.WM_MENUCHAR && cm3 != null)
-                {
-                    cm3.HandleMenuMsg2(umsg, wParam, lParam, out var result);
-                    handled = true;
-                    return result;
-                }
-                if ((umsg == ShellNativeMethods.WM_INITMENUPOPUP ||
-                     umsg == ShellNativeMethods.WM_DRAWITEM ||
-                     umsg == ShellNativeMethods.WM_MEASUREITEM) && cm2 != null)
-                {
-                    cm2.HandleMenuMsg(umsg, wParam, lParam);
-                    handled = true;
-                }
-                return IntPtr.Zero;
-            };
-            hwndSource?.AddHook(hook);
-
-            int cmd = ShellNativeMethods.TrackPopupMenuEx(hMenu,
-                ShellNativeMethods.TPM_RETURNCMD | ShellNativeMethods.TPM_NONOTIFY | ShellNativeMethods.TPM_LEFTALIGN,
-                x, y, hwnd, IntPtr.Zero);
-
-            if (hook != null && hwndSource != null)
-            {
-                hwndSource.RemoveHook(hook);
-                hook = null;
-            }
-
-            if (cmd > 0)
-            {
-                if (snapCmdIds.TryGetValue((uint)cmd, out var snapAction))
-                {
-                    snapAction.Invoke();
-                }
-                else if (cmd >= ShellNativeMethods.FIRST_CMD_ID && cmd <= ShellNativeMethods.LAST_CMD_ID)
-                {
-                    InvokeShellCommand(contextMenu, cmd, folderPath, hwnd, x, y);
-                    onRefresh?.Invoke();
-                }
-            }
+            return FinishPrepare(pm, flags);
         }
-        catch (COMException) { }
-        catch (Exception) { }
-        finally
+        catch
         {
-            if (hook != null && hwndSource != null)
-                hwndSource.RemoveHook(hook);
-
-            if (hMenu != IntPtr.Zero)
-                ShellNativeMethods.DestroyMenu(hMenu);
-
-            if (contextMenu != null)
-                Marshal.FinalReleaseComObject(contextMenu);
-
-            if (shellFolder != null)
-                Marshal.FinalReleaseComObject(shellFolder);
+            ReleaseOnWorker(pm);
+            return null;
         }
+    }
+
+    private static PreparedMenu? FinishPrepare(PreparedMenu pm, uint flags)
+    {
+        pm.HMenu = ShellNativeMethods.CreatePopupMenu();
+        if (pm.HMenu == IntPtr.Zero) { ReleaseOnWorker(pm); return null; }
+
+        pm.ContextMenu!.QueryContextMenu(pm.HMenu,
+            0, ShellNativeMethods.FIRST_CMD_ID, ShellNativeMethods.LAST_CMD_ID, flags);
+
+        // QueryInterface on the worker so the RCWs stay bound to this apartment.
+        pm.ContextMenu2 = pm.ContextMenu as IContextMenu2;
+        pm.ContextMenu3 = pm.ContextMenu as IContextMenu3;
+        return pm;
+    }
+
+    /// <summary>Full cleanup. Must run on the worker (releases COM objects).</summary>
+    private static void ReleaseOnWorker(PreparedMenu pm)
+    {
+        ReleaseHandlesOnly(pm);
+        try
+        {
+            if (pm.ContextMenu != null)
+                Marshal.FinalReleaseComObject(pm.ContextMenu);
+        }
+        catch { }
+        pm.ContextMenu = null;
+        pm.ContextMenu2 = null;
+        pm.ContextMenu3 = null;
+        try
+        {
+            if (pm.ShellFolder != null)
+                Marshal.FinalReleaseComObject(pm.ShellFolder);
+        }
+        catch { }
+        pm.ShellFolder = null;
+    }
+
+    /// <summary>Destroys the HMENU and frees PIDLs (safe on any thread, idempotent).</summary>
+    private static void ReleaseHandlesOnly(PreparedMenu pm)
+    {
+        if (pm.HMenu != IntPtr.Zero)
+        {
+            ShellNativeMethods.DestroyMenu(pm.HMenu);
+            pm.HMenu = IntPtr.Zero;
+        }
+        foreach (var pidl in pm.Pidls)
+            ShellNativeMethods.CoTaskMemFree(pidl);
+        pm.Pidls.Clear();
     }
 
     // ==================== Helpers ====================

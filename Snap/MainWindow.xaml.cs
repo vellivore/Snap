@@ -208,6 +208,13 @@ public partial class MainWindow : Window
         // Wire up command palette actions
         WireCommandPalette();
 
+        // Warm up shell extension DLLs on the shell-menu worker once the UI is idle (#5).
+        // Speeds up the first right-click; never shows UI, all errors swallowed.
+        _ = Dispatcher.BeginInvoke(DispatcherPriority.ApplicationIdle, () =>
+        {
+            try { _ = Snap.Interop.ShellMenuWorker.Instance.WarmUpAsync().ContinueWith(t => { _ = t.Exception; }); }
+            catch { }
+        });
     }
 
     private void RestoreWindowState(AppSettings settings)

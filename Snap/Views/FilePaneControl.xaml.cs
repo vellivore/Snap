@@ -18,6 +18,8 @@ public partial class FilePaneControl : UserControl
 {
     /// <summary>True while native shell context menu is open (suppress drop events across all panes).</summary>
     private static bool _shellMenuOpen;
+    /// <summary>True from right-click until the shell menu flow finishes (prevents a second menu).</summary>
+    private static bool _menuBusy;
     // File drag & drop state
     private Point _fileDragStartPoint;
     private bool _fileDragInProgress;
@@ -471,6 +473,9 @@ public partial class FilePaneControl : UserControl
 
     private void FileListView_PreviewMouseRightButtonDown(object sender, MouseButtonEventArgs e)
     {
+        // A menu is being prepared/shown: don't change the selection underneath it
+        if (_menuBusy) { e.Handled = true; return; }
+
         // Select the item under cursor on right-click down, suppress WPF context menu
         var hitElement = e.OriginalSource as DependencyObject;
         var listViewItem = FindAncestor<ListViewItem>(hitElement);
@@ -484,12 +489,15 @@ public partial class FilePaneControl : UserControl
         // Don't set e.Handled here - let the Up event handle the menu
     }
 
-    private void FileListView_PreviewMouseRightButtonUp(object sender, MouseButtonEventArgs e)
+    private async void FileListView_PreviewMouseRightButtonUp(object sender, MouseButtonEventArgs e)
     {
         var vm = ViewModel;
         if (vm == null) return;
 
         e.Handled = true;
+
+        // Never open two shell menus at once (same or another pane)
+        if (_menuBusy) return;
 
         var window = Window.GetWindow(this);
         if (window == null) return;
@@ -504,17 +512,21 @@ public partial class FilePaneControl : UserControl
         var hitElement = e.OriginalSource as DependencyObject;
         var listViewItem = FindAncestor<ListViewItem>(hitElement);
 
+        string[]? paths = null;
+        string? folderPath = null;
+        List<SnapMenuItem> customItems;
+
         if (listViewItem != null && FileListView.SelectedItems.Count > 0)
         {
             // Item context menu
-            var paths = FileListView.SelectedItems
+            paths = FileListView.SelectedItems
                 .OfType<FileItem>()
                 .Select(f => f.FullPath)
                 .ToArray();
 
             if (paths.Length == 0) return;
 
-            var customItems = new List<SnapMenuItem>();
+            customItems = new List<SnapMenuItem>();
 
             // Add "Bookmark" for folders
             var selectedItem = vm.SelectedItem;
@@ -527,69 +539,65 @@ public partial class FilePaneControl : UserControl
                     RaiseEvent(new RoutedEventArgs(AddBookmarkRequestedEvent, this));
                 }));
             }
-
-            // Show wait cursor while shell extensions load
-            Mouse.OverrideCursor = Cursors.Wait;
-
-            // Disable AllowDrop on all panes to prevent drag-drop during menu pump
-            var allPanes = GetAllFilePanes();
-            foreach (var pane in allPanes) pane.SetAllowDrop(false);
-            _shellMenuOpen = true;
-            try
-            {
-                ShellContextMenu.ShowContextMenu(hwnd, paths, x, y,
-                    onRefresh: () => Dispatcher.BeginInvoke(async () => { if (vm != null) await vm.Refresh(); }),
-                    customItems: customItems,
-                    onMenuReady: () => Mouse.OverrideCursor = null);
-            }
-            finally
-            {
-                Mouse.OverrideCursor = null;
-                Dispatcher.BeginInvoke(System.Windows.Threading.DispatcherPriority.ApplicationIdle, () =>
-                {
-                    _shellMenuOpen = false;
-                    foreach (var pane in allPanes) pane.SetAllowDrop(true);
-                });
-            }
         }
         else
         {
             // Background context menu
-            var folderPath = vm.CurrentPath;
+            folderPath = vm.CurrentPath;
             if (string.IsNullOrEmpty(folderPath)) return;
 
-            var customItems = new List<SnapMenuItem>
+            var bgPath = folderPath;
+            customItems = new List<SnapMenuItem>
             {
                 new("ブックマークに追加", () =>
                 {
-                    PendingBookmarkPath = folderPath;
+                    PendingBookmarkPath = bgPath;
                     RaiseEvent(new RoutedEventArgs(AddBookmarkRequestedEvent, this));
                 }),
                 new("更新", () => Dispatcher.BeginInvoke(async () => { if (vm != null) await vm.Refresh(); })),
             };
+        }
 
-            // Show wait cursor while shell extensions load
+        _menuBusy = true;
+        List<FilePaneControl> allPanes = new();
+        try
+        {
+            // Show wait cursor while shell extensions load (UI stays responsive meanwhile)
             Mouse.OverrideCursor = Cursors.Wait;
 
-            var allPanes2 = GetAllFilePanes();
-            foreach (var pane in allPanes2) pane.SetAllowDrop(false);
+            // Disable AllowDrop on all panes to prevent drag-drop during menu pump
+            allPanes = GetAllFilePanes();
+            foreach (var pane in allPanes) pane.SetAllowDrop(false);
             _shellMenuOpen = true;
+
+            Action onRefresh = () => Dispatcher.BeginInvoke(async () => { if (vm != null) await vm.Refresh(); });
+            Action onMenuReady = () => Mouse.OverrideCursor = null;
+
+            if (paths != null)
+                await ShellContextMenu.ShowContextMenuAsync(hwnd, paths, x, y,
+                    onRefresh: onRefresh, customItems: customItems, onMenuReady: onMenuReady);
+            else
+                await ShellContextMenu.ShowBackgroundMenuAsync(hwnd, folderPath!, x, y,
+                    onRefresh: onRefresh, customItems: customItems, onMenuReady: onMenuReady);
+        }
+        catch (Exception)
+        {
+            // async void: never let an exception escape to the dispatcher
+        }
+        finally
+        {
             try
             {
-                ShellContextMenu.ShowBackgroundMenu(hwnd, folderPath, x, y,
-                    onRefresh: () => Dispatcher.BeginInvoke(async () => { if (vm != null) await vm.Refresh(); }),
-                    customItems: customItems,
-                    onMenuReady: () => Mouse.OverrideCursor = null);
-            }
-            finally
-            {
                 Mouse.OverrideCursor = null;
-                Dispatcher.BeginInvoke(System.Windows.Threading.DispatcherPriority.ApplicationIdle, () =>
+                var panes = allPanes;
+                _ = Dispatcher.BeginInvoke(System.Windows.Threading.DispatcherPriority.ApplicationIdle, () =>
                 {
                     _shellMenuOpen = false;
-                    foreach (var pane in allPanes2) pane.SetAllowDrop(true);
+                    foreach (var pane in panes) pane.SetAllowDrop(true);
                 });
             }
+            catch { }
+            _menuBusy = false;
         }
     }
 

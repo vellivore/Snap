@@ -334,70 +334,33 @@ public partial class FilePaneViewModel : ObservableObject
             return;
         }
 
-        IsLoading = true;
         var destDir = CurrentPath;
-        int successCount = 0;
-        int errorCount = 0;
 
+        // PC ビュー（ドライブ一覧）には貼り付けできない
+        if (string.Equals(destDir, PcViewPath, StringComparison.OrdinalIgnoreCase))
+        {
+            StatusMessage = "ここには貼り付けできません";
+            return;
+        }
+
+        IsLoading = true;
         try
         {
-            await Task.Run(() =>
-            {
-                foreach (var sourcePath in paths)
-                {
-                    try
-                    {
-                        var name = Path.GetFileName(sourcePath);
-                        var destPath = Path.Combine(destDir, name);
+            // Shell の IFileOperation で実行（UAC 昇格・進捗・名前衝突ダイアログ・ごみ箱に対応）
+            var result = isCut
+                ? await Interop.ShellFileOperation.MoveAsync(paths, destDir)
+                : await Interop.ShellFileOperation.CopyAsync(paths, destDir);
 
-                        // Handle name collision
-                        destPath = GetUniqueDestPath(destPath);
-
-                        if (Directory.Exists(sourcePath))
-                        {
-                            if (isCut)
-                            {
-                                Directory.Move(sourcePath, destPath);
-                            }
-                            else
-                            {
-                                CopyDirectoryRecursive(sourcePath, destPath);
-                            }
-                        }
-                        else if (File.Exists(sourcePath))
-                        {
-                            if (isCut)
-                            {
-                                File.Move(sourcePath, destPath);
-                            }
-                            else
-                            {
-                                File.Copy(sourcePath, destPath);
-                            }
-                        }
-                        successCount++;
-                    }
-                    catch
-                    {
-                        errorCount++;
-                    }
-                }
-            });
-
-            if (isCut)
-            {
+            if (isCut && result.Success)
                 _clipboardPaths = null;
-            }
 
-            StatusMessage = errorCount > 0
-                ? $"{successCount} 項目を貼り付け、{errorCount} 項目でエラー"
-                : $"{successCount} 項目を貼り付けました";
+            StatusMessage = result.Success
+                ? (isCut ? "移動しました" : "貼り付けました")
+                : result.Aborted
+                    ? "操作がキャンセルされました"
+                    : $"貼り付けエラー: {result.Error}";
 
             await Refresh();
-        }
-        catch (Exception ex)
-        {
-            StatusMessage = $"貼り付けエラー: {ex.Message}";
         }
         finally
         {
@@ -418,51 +381,27 @@ public partial class FilePaneViewModel : ObservableObject
 
         var names = string.Join("\n", items.Select(f => f.Name));
         var result = MessageBox.Show(
-            $"以下の {items.Count} 項目を削除しますか？\n\n{names}",
-            "削除の確認",
+            $"以下の {items.Count} 項目をごみ箱へ移動しますか？\n\n{names}\n\n※ ごみ箱が使えない場所（ネットワーク等）では完全に削除されます。",
+            "ごみ箱へ移動",
             MessageBoxButton.YesNo,
             MessageBoxImage.Warning);
 
         if (result != MessageBoxResult.Yes) return;
 
         IsLoading = true;
-        int successCount = 0;
-        int errorCount = 0;
-
         try
         {
-            await Task.Run(() =>
-            {
-                foreach (var item in items)
-                {
-                    try
-                    {
-                        if (item.IsDirectory)
-                        {
-                            Directory.Delete(item.FullPath, true);
-                        }
-                        else
-                        {
-                            File.Delete(item.FullPath);
-                        }
-                        successCount++;
-                    }
-                    catch
-                    {
-                        errorCount++;
-                    }
-                }
-            });
+            // Shell の IFileOperation で削除（権限が必要な対象は UAC 昇格、ごみ箱へ送る＝元に戻せる）
+            var opResult = await Interop.ShellFileOperation.DeleteAsync(
+                items.Select(i => i.FullPath).ToList());
 
-            StatusMessage = errorCount > 0
-                ? $"{successCount} 項目を削除、{errorCount} 項目でエラー"
-                : $"{successCount} 項目を削除しました";
+            StatusMessage = opResult.Success
+                ? $"{items.Count} 項目をごみ箱へ移動しました"
+                : opResult.Aborted
+                    ? "削除がキャンセルされました"
+                    : $"削除エラー: {opResult.Error}";
 
             await Refresh();
-        }
-        catch (Exception ex)
-        {
-            StatusMessage = $"削除エラー: {ex.Message}";
         }
         finally
         {
@@ -744,43 +683,6 @@ public partial class FilePaneViewModel : ObservableObject
         if (parts.Length < 2) return null;
 
         return parent;
-    }
-
-    private static string GetUniqueDestPath(string destPath)
-    {
-        if (!File.Exists(destPath) && !Directory.Exists(destPath))
-            return destPath;
-
-        var dir = Path.GetDirectoryName(destPath)!;
-        var nameWithoutExt = Path.GetFileNameWithoutExtension(destPath);
-        var ext = Path.GetExtension(destPath);
-
-        int counter = 2;
-        string newPath;
-        do
-        {
-            newPath = Path.Combine(dir, $"{nameWithoutExt} ({counter}){ext}");
-            counter++;
-        } while (File.Exists(newPath) || Directory.Exists(newPath));
-
-        return newPath;
-    }
-
-    private static void CopyDirectoryRecursive(string sourceDir, string destDir)
-    {
-        Directory.CreateDirectory(destDir);
-
-        foreach (var file in Directory.GetFiles(sourceDir))
-        {
-            var destFile = Path.Combine(destDir, Path.GetFileName(file));
-            File.Copy(file, destFile);
-        }
-
-        foreach (var subDir in Directory.GetDirectories(sourceDir))
-        {
-            var destSubDir = Path.Combine(destDir, Path.GetFileName(subDir));
-            CopyDirectoryRecursive(subDir, destSubDir);
-        }
     }
 
     public void SortByColumn(string column)

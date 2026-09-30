@@ -710,17 +710,22 @@ public partial class FilePaneControl : UserControl
             return;
         }
 
+        // Ctrl 押下でコピー、それ以外は移動（Drop 側と同じ判定）
+        var effect = (e.KeyStates & DragDropKeyStates.ControlKey) != 0
+            ? DragDropEffects.Copy
+            : DragDropEffects.Move;
+
         // Check if over a folder item
         var target = GetFileItemUnderMouse(e);
         if (target is { IsDirectory: true })
         {
-            e.Effects = DragDropEffects.Move;
+            e.Effects = effect;
         }
         else
         {
-            // Allow drop to current directory (move into this pane's current folder)
+            // Allow drop to current directory (into this pane's current folder)
             if (ViewModel != null)
-                e.Effects = DragDropEffects.Move;
+                e.Effects = effect;
         }
 
         e.Handled = true;
@@ -762,62 +767,28 @@ public partial class FilePaneControl : UserControl
             return;
         }
 
-        // Perform move
-        int successCount = 0;
-        int errorCount = 0;
-        var errors = new System.Collections.Generic.List<string>();
+        // PC ビュー（ドライブ一覧）にはドロップできない
+        if (string.Equals(targetFolder, FilePaneViewModel.PcViewPath, StringComparison.OrdinalIgnoreCase))
+        {
+            vm.StatusMessage = "ここにはドロップできません";
+            return;
+        }
+
+        // Ctrl 押下でコピー、それ以外は移動
+        bool isCopy = (e.KeyStates & DragDropKeyStates.ControlKey) != 0;
 
         try
         {
-            await Task.Run(() =>
-            {
-                foreach (var sourcePath in sourcePaths)
-                {
-                    try
-                    {
-                        var name = Path.GetFileName(sourcePath);
-                        var destPath = Path.Combine(targetFolder, name);
+            // Shell の IFileOperation で実行（UAC 昇格・進捗・名前衝突ダイアログはシェルに任せる）
+            var result = isCopy
+                ? await ShellFileOperation.CopyAsync(sourcePaths, targetFolder)
+                : await ShellFileOperation.MoveAsync(sourcePaths, targetFolder);
 
-                        // Skip if source == dest
-                        if (string.Equals(sourcePath, destPath, StringComparison.OrdinalIgnoreCase))
-                            continue;
-
-                        // Handle name collision
-                        if (File.Exists(destPath) || Directory.Exists(destPath))
-                        {
-                            var nameNoExt = Path.GetFileNameWithoutExtension(name);
-                            var ext = Path.GetExtension(name);
-                            int counter = 2;
-                            do
-                            {
-                                destPath = Path.Combine(targetFolder, $"{nameNoExt} ({counter}){ext}");
-                                counter++;
-                            } while (File.Exists(destPath) || Directory.Exists(destPath));
-                        }
-
-                        if (Directory.Exists(sourcePath))
-                            Directory.Move(sourcePath, destPath);
-                        else if (File.Exists(sourcePath))
-                            File.Move(sourcePath, destPath);
-
-                        successCount++;
-                    }
-                    catch (Exception ex)
-                    {
-                        errorCount++;
-                        errors.Add($"{Path.GetFileName(sourcePath)}: {ex.Message}");
-                    }
-                }
-            });
-
-            if (errorCount > 0)
-            {
-                vm.StatusMessage = $"{successCount} 項目を移動、{errorCount} 項目でエラー: {string.Join("; ", errors.Take(3))}";
-            }
-            else if (successCount > 0)
-            {
-                vm.StatusMessage = $"{successCount} 項目を移動しました";
-            }
+            vm.StatusMessage = result.Success
+                ? (isCopy ? $"{sourcePaths.Length} 項目をコピーしました" : $"{sourcePaths.Length} 項目を移動しました")
+                : result.Aborted
+                    ? "操作がキャンセルされました"
+                    : $"{(isCopy ? "コピー" : "移動")}エラー: {result.Error}";
 
             // Refresh all panes that might be affected
             try { await vm.Refresh(); } catch { }
@@ -825,7 +796,6 @@ public partial class FilePaneControl : UserControl
         }
         catch (Exception ex)
         {
-            // 移動自体のエラーのみ表示（リフレッシュエラーは無視）
             vm.StatusMessage = $"エラー: {ex.Message}";
         }
 

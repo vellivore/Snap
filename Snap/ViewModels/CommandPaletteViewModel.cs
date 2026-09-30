@@ -331,6 +331,17 @@ public partial class CommandPaletteViewModel : ObservableObject
             }
         }
         catch (OperationCanceledException) { }
+        catch (Exception ex)
+        {
+            if (!token.IsCancellationRequested)
+            {
+                Snap.Services.Log.Warn("CommandPalette.Search", query, ex);
+                SearchStatusText = $"検索エラー: {ex.Message}";
+            }
+        }
+
+        // A newer query replaced this one: its state (IsSearching / Results) belongs to it.
+        if (token.IsCancellationRequested) return;
 
         IsSearching = false;
         if (Results.Count > 0 && SelectedItem == null)
@@ -524,6 +535,9 @@ public partial class CommandPaletteViewModel : ObservableObject
             }
         }, token);
 
+        // Superseded while finishing: don't append stale results to the newer search.
+        token.ThrowIfCancellationRequested();
+
         // Flush remaining batch
         if (batch.Count > 0)
         {
@@ -641,6 +655,8 @@ public partial class CommandPaletteViewModel : ObservableObject
                 }
             }
         }, token);
+
+        token.ThrowIfCancellationRequested();
 
         if (skipped > 0)
             Snap.Services.Log.Warn("CommandPalette.ContentSearch",

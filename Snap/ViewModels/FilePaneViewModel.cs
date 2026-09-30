@@ -17,6 +17,14 @@ public partial class FilePaneViewModel : ObservableObject
     [ObservableProperty]
     private string _currentPath = string.Empty;
 
+    /// <summary>
+    /// Text in the address bar while editing. Separate from <see cref="CurrentPath"/> so a
+    /// half-typed path never becomes the paste/drop/F5 target, gets saved, or enters Today.
+    /// Committed only by <see cref="OnAddressBarEnter"/>.
+    /// </summary>
+    [ObservableProperty]
+    private string _addressText = string.Empty;
+
     [ObservableProperty]
     private bool _isLoading;
 
@@ -48,11 +56,13 @@ public partial class FilePaneViewModel : ObservableObject
     // Navigation history
     private readonly List<string> _history = new();
     private int _historyIndex = -1;
-    private bool _navigatingFromHistory;
 
-    // Clipboard state for cut/copy
-    private static List<string>? _clipboardPaths;
-    private static bool _clipboardIsCut;
+    // Navigation generation: every navigation takes a new number; a load that finishes after a
+    // newer one started is discarded (it must not touch Items / CurrentPath / history / IsLoading).
+    private int _navGeneration;
+
+    // Windows clipboard format that marks cut (Move) vs copy, shared with Explorer.
+    private const string PreferredDropEffectFormat = "Preferred DropEffect";
 
     // Usage tracking
     private UsageTracker? _usageTracker;
@@ -68,7 +78,13 @@ public partial class FilePaneViewModel : ObservableObject
         if (string.IsNullOrWhiteSpace(initialPath) || !Directory.Exists(initialPath))
             initialPath = @"C:\";
         CurrentPath = initialPath;
+        AddressText = initialPath;
     }
+
+    partial void OnCurrentPathChanged(string value) => AddressText = value;
+
+    /// <summary>Discard address-bar edits (Esc / focus loss).</summary>
+    public void ResetAddressText() => AddressText = CurrentPath;
 
     public void SetUsageTracker(UsageTracker tracker)
     {
@@ -85,7 +101,11 @@ public partial class FilePaneViewModel : ObservableObject
     public const string PcViewPath = "::PC";
 
     [RelayCommand]
-    public async Task NavigateToAsync(string path)
+    public Task NavigateToAsync(string path) => NavigateCoreAsync(path, addToHistory: true, historyIndex: null);
+
+    /// <param name="addToHistory">Push onto the history on success (normal navigation).</param>
+    /// <param name="historyIndex">Back/Forward: the history slot to move to, applied only on success.</param>
+    private async Task NavigateCoreAsync(string path, bool addToHistory, int? historyIndex)
     {
         if (string.IsNullOrWhiteSpace(path))
             return;
@@ -118,13 +138,21 @@ public partial class FilePaneViewModel : ObservableObject
             path = PcViewPath;
         }
 
+        var gen = Interlocked.Increment(ref _navGeneration);
+        bool IsCurrent() => gen == Volatile.Read(ref _navGeneration);
+
         IsLoading = true;
         StatusMessage = "読み込み中...";
 
         try
         {
             var tracker = _usageTracker;
-            var items = await Task.Run(() => isPcView ? LoadDrives() : LoadDirectory(path));
+            var load = await Task.Run(() => isPcView ? LoadDrives() : LoadDirectory(path));
+
+            // A newer navigation started while this one was loading: drop this result.
+            if (!IsCurrent()) return;
+
+            var items = load.Items;
 
             // Set frequency levels
             if (tracker != null)
@@ -147,19 +175,21 @@ public partial class FilePaneViewModel : ObservableObject
                 TabHeader = isPcView ? "PC"
                     : Path.GetFileName(path.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar))
                             is { Length: > 0 } name ? name : path;
-                StatusMessage = $"{Items.Count} 項目";
+                StatusMessage = load.Skipped > 0
+                    ? $"{Items.Count} 項目（読めない項目 {load.Skipped} 件を省略）"
+                    : $"{Items.Count} 項目";
             });
 
-            // Update navigation history
-            if (!_navigatingFromHistory)
+            // Update navigation history (only after a successful load)
+            if (historyIndex is int hi)
+            {
+                _historyIndex = hi;
+            }
+            else if (addToHistory)
             {
                 // 同じパスなら履歴に追加しない
-                if (_historyIndex >= 0 && _historyIndex < _history.Count
-                    && string.Equals(_history[_historyIndex], path, StringComparison.OrdinalIgnoreCase))
-                {
-                    // skip
-                }
-                else
+                if (!(_historyIndex >= 0 && _historyIndex < _history.Count
+                      && string.Equals(_history[_historyIndex], path, StringComparison.OrdinalIgnoreCase)))
                 {
                     // Remove forward history
                     if (_historyIndex < _history.Count - 1)
@@ -170,7 +200,6 @@ public partial class FilePaneViewModel : ObservableObject
                     _historyIndex = _history.Count - 1;
                 }
             }
-            _navigatingFromHistory = false;
 
             OnPropertyChanged(nameof(CanGoBack));
             OnPropertyChanged(nameof(CanGoForward));
@@ -179,27 +208,33 @@ public partial class FilePaneViewModel : ObservableObject
         }
         catch (UnauthorizedAccessException ex)
         {
+            if (!IsCurrent()) return;
             Log.Warn("FilePane.Navigate", $"access denied: {path}", ex);
-            StatusMessage = "アクセスが拒否されました。";
+            StatusMessage = $"アクセスが拒否されました: {path}";
         }
         catch (DirectoryNotFoundException ex)
         {
+            if (!IsCurrent()) return;
             Log.Warn("FilePane.Navigate", $"not found: {path}", ex);
             StatusMessage = $"ディレクトリが見つかりません: {path} ({ex.Message})";
         }
         catch (IOException ex)
         {
+            if (!IsCurrent()) return;
             Log.Warn("FilePane.Navigate", $"io error: {path}", ex);
             StatusMessage = $"IOエラー: {ex.Message}";
         }
         catch (Exception ex)
         {
+            if (!IsCurrent()) return;
             Log.Error("FilePane.Navigate", path, ex);
             StatusMessage = $"エラー: {ex.Message}";
         }
         finally
         {
-            IsLoading = false;
+            // Only the latest navigation clears the loading state.
+            if (IsCurrent())
+                IsLoading = false;
         }
     }
 
@@ -207,25 +242,22 @@ public partial class FilePaneViewModel : ObservableObject
     public async Task GoBack()
     {
         if (!CanGoBack) return;
-        _historyIndex--;
-        _navigatingFromHistory = true;
-        await NavigateToAsync(_history[_historyIndex]);
+        var target = _historyIndex - 1;
+        await NavigateCoreAsync(_history[target], addToHistory: false, historyIndex: target);
     }
 
     [RelayCommand(CanExecute = nameof(CanGoForward))]
     public async Task GoForward()
     {
         if (!CanGoForward) return;
-        _historyIndex++;
-        _navigatingFromHistory = true;
-        await NavigateToAsync(_history[_historyIndex]);
+        var target = _historyIndex + 1;
+        await NavigateCoreAsync(_history[target], addToHistory: false, historyIndex: target);
     }
 
     [RelayCommand]
     public async Task Refresh()
     {
-        _navigatingFromHistory = true;
-        await NavigateToAsync(CurrentPath);
+        await NavigateCoreAsync(CurrentPath, addToHistory: false, historyIndex: null);
     }
 
     [RelayCommand]
@@ -264,30 +296,17 @@ public partial class FilePaneViewModel : ObservableObject
     }
 
     [RelayCommand]
-    public void CopyItems(System.Collections.IList? selectedItems)
-    {
-        if (selectedItems == null || selectedItems.Count == 0) return;
-
-        var paths = selectedItems.OfType<FileItem>()
-            .Where(f => f.Name != "..")
-            .Select(f => f.FullPath)
-            .ToList();
-
-        if (paths.Count == 0) return;
-
-        _clipboardPaths = paths;
-        _clipboardIsCut = false;
-
-        // Also set Windows clipboard
-        var fileDropList = new StringCollection();
-        fileDropList.AddRange(paths.ToArray());
-        Application.Current.Dispatcher.Invoke(() => Clipboard.SetFileDropList(fileDropList));
-
-        StatusMessage = $"{paths.Count} 項目をコピーしました";
-    }
+    public void CopyItems(System.Collections.IList? selectedItems) => PutOnClipboard(selectedItems, cut: false);
 
     [RelayCommand]
-    public void CutItems(System.Collections.IList? selectedItems)
+    public void CutItems(System.Collections.IList? selectedItems) => PutOnClipboard(selectedItems, cut: true);
+
+    /// <summary>
+    /// Puts the selection on the Windows clipboard (the only source of truth) as FileDrop plus
+    /// "Preferred DropEffect" (Move for cut, Copy for copy), the same way Explorer does, so a
+    /// cut in Snap is a move when pasted in Explorer and vice versa.
+    /// </summary>
+    private void PutOnClipboard(System.Collections.IList? selectedItems, bool cut)
     {
         if (selectedItems == null || selectedItems.Count == 0) return;
 
@@ -298,43 +317,89 @@ public partial class FilePaneViewModel : ObservableObject
 
         if (paths.Count == 0) return;
 
-        _clipboardPaths = paths;
-        _clipboardIsCut = true;
+        try
+        {
+            var fileDropList = new StringCollection();
+            fileDropList.AddRange(paths.ToArray());
 
-        // Also set Windows clipboard
-        var fileDropList = new StringCollection();
-        fileDropList.AddRange(paths.ToArray());
-        Application.Current.Dispatcher.Invoke(() => Clipboard.SetFileDropList(fileDropList));
+            var data = new DataObject();
+            data.SetFileDropList(fileDropList);
+            var effect = cut ? DragDropEffects.Move : DragDropEffects.Copy;
+            data.SetData(PreferredDropEffectFormat, new MemoryStream(BitConverter.GetBytes((int)effect)));
 
-        StatusMessage = $"{paths.Count} 項目を切り取りました";
+            Application.Current.Dispatcher.Invoke(() => Clipboard.SetDataObject(data, copy: true));
+        }
+        catch (Exception ex)
+        {
+            Log.Warn("FilePane.Clipboard", cut ? "cut failed" : "copy failed", ex);
+            StatusMessage = $"クリップボードに書き込めません: {ex.Message}";
+            return;
+        }
+
+        StatusMessage = cut ? $"{paths.Count} 項目を切り取りました" : $"{paths.Count} 項目をコピーしました";
+    }
+
+    /// <summary>Reads FileDrop and Preferred DropEffect from the Windows clipboard.</summary>
+    private static (List<string> Paths, bool IsCut) ReadClipboard()
+    {
+        var data = Clipboard.GetDataObject();
+        if (data == null || !data.GetDataPresent(DataFormats.FileDrop))
+            return (new List<string>(), false);
+
+        var paths = (data.GetData(DataFormats.FileDrop) as string[] ?? Array.Empty<string>())
+            .Where(p => !string.IsNullOrEmpty(p))
+            .ToList();
+
+        var effect = DragDropEffects.Copy;
+        if (data.GetDataPresent(PreferredDropEffectFormat))
+        {
+            var raw = data.GetData(PreferredDropEffectFormat);
+            byte[]? bytes = raw switch
+            {
+                byte[] b => b,
+                Stream st => ReadAll(st),
+                _ => null,
+            };
+            if (bytes is { Length: >= 4 })
+                effect = (DragDropEffects)BitConverter.ToInt32(bytes, 0);
+        }
+
+        // Explorer: cut = MOVE (2), copy = COPY|LINK (5). Treat anything that allows copy as copy.
+        bool isCut = (effect & DragDropEffects.Move) != 0 && (effect & DragDropEffects.Copy) == 0;
+        return (paths, isCut);
+
+        static byte[] ReadAll(Stream st)
+        {
+            if (st.CanSeek) st.Position = 0;
+            var buf = new byte[4];
+            int n = 0;
+            while (n < 4)
+            {
+                int r = st.Read(buf, n, 4 - n);
+                if (r <= 0) break;
+                n += r;
+            }
+            return n == 4 ? buf : Array.Empty<byte>();
+        }
     }
 
     [RelayCommand]
     public async Task PasteItems()
     {
-        List<string>? paths = _clipboardPaths;
-        bool isCut = _clipboardIsCut;
-
-        // Fallback to Windows clipboard
-        if (paths == null || paths.Count == 0)
+        List<string> paths;
+        bool isCut;
+        try
         {
-            StringCollection? fileDropList = null;
-            Application.Current.Dispatcher.Invoke(() =>
-            {
-                if (Clipboard.ContainsFileDropList())
-                {
-                    fileDropList = Clipboard.GetFileDropList();
-                }
-            });
-
-            if (fileDropList != null && fileDropList.Count > 0)
-            {
-                paths = fileDropList.Cast<string>().Where(s => s != null).ToList();
-                isCut = false; // Can't determine from Windows clipboard
-            }
+            (paths, isCut) = Application.Current.Dispatcher.Invoke(ReadClipboard);
+        }
+        catch (Exception ex)
+        {
+            Log.Warn("FilePane.Paste", "clipboard read failed", ex);
+            StatusMessage = $"クリップボードを読めません: {ex.Message}";
+            return;
         }
 
-        if (paths == null || paths.Count == 0)
+        if (paths.Count == 0)
         {
             StatusMessage = "貼り付けるファイルがありません";
             return;
@@ -357,8 +422,21 @@ public partial class FilePaneViewModel : ObservableObject
                 ? await Interop.ShellFileOperation.MoveAsync(paths, destDir)
                 : await Interop.ShellFileOperation.CopyAsync(paths, destDir);
 
+            // Like Explorer: after a cut is pasted, empty the clipboard so a second paste
+            // doesn't try to move files that are already gone. Only if it still holds our data.
             if (isCut && result.Success)
-                _clipboardPaths = null;
+            {
+                try
+                {
+                    Application.Current.Dispatcher.Invoke(() =>
+                    {
+                        var (now, nowCut) = ReadClipboard();
+                        if (nowCut && now.SequenceEqual(paths, StringComparer.OrdinalIgnoreCase))
+                            Clipboard.Clear();
+                    });
+                }
+                catch (Exception ex) { Log.Warn("FilePane.Paste", "clipboard clear after move failed", ex); }
+            }
 
             if (!result.Success && !result.Aborted)
                 Log.Warn("FilePane.Paste", $"{(isCut ? "move" : "copy")} to {destDir} failed: {result.Error}");
@@ -488,9 +566,12 @@ public partial class FilePaneViewModel : ObservableObject
         }
     }
 
-    private static List<FileItem> LoadDrives()
+    private readonly record struct LoadResult(List<FileItem> Items, int Skipped);
+
+    private static LoadResult LoadDrives()
     {
         var items = new List<FileItem>();
+        int skipped = 0;
         foreach (var drive in DriveInfo.GetDrives())
         {
             try
@@ -524,19 +605,27 @@ public partial class FilePaneViewModel : ObservableObject
             catch (Exception ex)
             {
                 // Skip inaccessible drives
+                skipped++;
                 Log.Warn("FilePane.LoadDrives", drive.Name, ex);
             }
         }
-        return items;
+        return new LoadResult(items, skipped);
     }
 
-    private static List<FileItem> LoadDirectory(string path)
+    /// <summary>
+    /// Lists a directory. Failures of the enumeration itself (access denied, gone, I/O) are
+    /// thrown so the caller reports them and keeps them out of the history; only failures of
+    /// individual entries are skipped and counted.
+    /// </summary>
+    private static LoadResult LoadDirectory(string path)
     {
         var items = new List<FileItem>();
+        int skipped = 0;
+        Exception? firstSkip = null;
 
         // UNC server path (\\server) — enumerate network shares via NetShareEnum
         if (IsUncServerPath(path))
-            return EnumerateNetworkShares(path);
+            return new LoadResult(EnumerateNetworkShares(path), 0);
 
         var dirInfo = new DirectoryInfo(path);
 
@@ -544,69 +633,56 @@ public partial class FilePaneViewModel : ObservableObject
             throw new DirectoryNotFoundException($"ディレクトリが見つかりません: {path}");
 
         // Directories first
-        try
+        foreach (var dir in dirInfo.EnumerateDirectories())
         {
-            foreach (var dir in dirInfo.EnumerateDirectories())
+            try
             {
-                try
+                var (icon, typeName) = IconHelper.GetIconAndType(dir.FullName, true);
+                items.Add(new FileItem
                 {
-                    var (icon, typeName) = IconHelper.GetIconAndType(dir.FullName, true);
-                    items.Add(new FileItem
-                    {
-                        Name = dir.Name,
-                        FullPath = dir.FullName,
-                        LastModified = dir.LastWriteTime,
-                        IsDirectory = true,
-                        Type = typeName,
-                        Icon = icon,
-                    });
-                }
-                catch (Exception ex)
-                {
-                    // Skip inaccessible directories
-                    Log.Warn("FilePane.LoadDirectory", $"skip dir: {dir.FullName}", ex);
-                }
+                    Name = dir.Name,
+                    FullPath = dir.FullName,
+                    LastModified = dir.LastWriteTime,
+                    IsDirectory = true,
+                    Type = typeName,
+                    Icon = icon,
+                });
             }
-        }
-        catch (Exception ex)
-        {
-            // Skip if enumeration fails
-            Log.Warn("FilePane.LoadDirectory", $"directory enumeration failed: {path}", ex);
+            catch (Exception ex)
+            {
+                skipped++;
+                firstSkip ??= ex;
+            }
         }
 
         // Files
-        try
+        foreach (var file in dirInfo.EnumerateFiles())
         {
-            foreach (var file in dirInfo.EnumerateFiles())
+            try
             {
-                try
+                var (icon, typeName) = IconHelper.GetIconAndType(file.FullName, false);
+                items.Add(new FileItem
                 {
-                    var (icon, typeName) = IconHelper.GetIconAndType(file.FullName, false);
-                    items.Add(new FileItem
-                    {
-                        Name = file.Name,
-                        FullPath = file.FullName,
-                        LastModified = file.LastWriteTime,
-                        Size = file.Length,
-                        IsDirectory = false,
-                        Type = typeName,
-                        Icon = icon,
-                    });
-                }
-                catch (Exception ex)
-                {
-                    // Skip inaccessible files
-                    Log.Warn("FilePane.LoadDirectory", $"skip file: {file.FullName}", ex);
-                }
+                    Name = file.Name,
+                    FullPath = file.FullName,
+                    LastModified = file.LastWriteTime,
+                    Size = file.Length,
+                    IsDirectory = false,
+                    Type = typeName,
+                    Icon = icon,
+                });
+            }
+            catch (Exception ex)
+            {
+                skipped++;
+                firstSkip ??= ex;
             }
         }
-        catch (Exception ex)
-        {
-            // Skip if enumeration fails
-            Log.Warn("FilePane.LoadDirectory", $"file enumeration failed: {path}", ex);
-        }
 
-        return items;
+        if (skipped > 0)
+            Log.Warn("FilePane.LoadDirectory", $"{skipped} entr(ies) skipped in {path}; first error shown", firstSkip);
+
+        return new LoadResult(items, skipped);
     }
 
     // ==================== Network share enumeration ====================
@@ -764,6 +840,6 @@ public partial class FilePaneViewModel : ObservableObject
 
     public async Task OnAddressBarEnter()
     {
-        await NavigateToAsync(CurrentPath);
+        await NavigateToAsync(AddressText);
     }
 }

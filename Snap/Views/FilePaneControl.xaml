@@ -81,7 +81,7 @@
 
                 <!-- Edit mode (hidden by default) -->
                 <TextBox x:Name="AddressTextBox"
-                         Text="{Binding CurrentPath, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                         Text="{Binding AddressText, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
                          KeyDown="AddressBar_KeyDown"
                          LostFocus="AddressBar_LostFocus"
                          Visibility="Collapsed"

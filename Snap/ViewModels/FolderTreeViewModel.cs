@@ -457,7 +457,8 @@ public partial class FolderTreeViewModel : ObservableObject
         Bookmarks.Clear();
         foreach (var path in paths)
         {
-            if (!string.IsNullOrWhiteSpace(path))
+            // Drop sentinel entries saved by older versions ("::PC" / "::\PC").
+            if (!string.IsNullOrWhiteSpace(path) && !path.StartsWith("::"))
             {
                 var name = Path.GetFileName(path.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
                 if (string.IsNullOrEmpty(name)) name = path; // ドライブルートの場合
@@ -472,6 +473,13 @@ public partial class FolderTreeViewModel : ObservableObject
     /// </summary>
     public void AddBookmark(string path)
     {
+        // Only real directories: rejects the "::PC" sentinel and paths that no longer exist.
+        if (string.IsNullOrWhiteSpace(path) || !Directory.Exists(path))
+        {
+            Log.Info("FolderTree.AddBookmark", $"not a directory, skipped: {path}");
+            return;
+        }
+
         var normalized = Path.GetFullPath(path);
         foreach (var bm in Bookmarks)
         {

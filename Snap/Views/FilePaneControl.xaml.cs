@@ -317,8 +317,10 @@ public partial class FilePaneControl : UserControl
         }
     }
 
-    private void SwitchToEditMode()
+    /// <summary>Focus the address bar in edit mode (click on blank area, Ctrl+L, Alt+D, F4).</summary>
+    public void SwitchToEditMode()
     {
+        ViewModel?.ResetAddressText();
         BreadcrumbBar.Visibility = Visibility.Collapsed;
         AddressTextBox.Visibility = Visibility.Visible;
         AddressTextBox.Focus();
@@ -335,20 +337,27 @@ public partial class FilePaneControl : UserControl
     {
         if (e.Key == Key.Enter)
         {
+            e.Handled = true;
             if (ViewModel is { } vm)
             {
                 await vm.OnAddressBarEnter();
                 SwitchToBreadcrumbMode();
+                FileListView.Focus();
             }
         }
         else if (e.Key == Key.Escape)
         {
+            // Discard the edit: the address goes back to the committed CurrentPath.
+            e.Handled = true;
+            ViewModel?.ResetAddressText();
             SwitchToBreadcrumbMode();
+            FileListView.Focus();
         }
     }
 
     private void AddressBar_LostFocus(object sender, RoutedEventArgs e)
     {
+        ViewModel?.ResetAddressText();
         SwitchToBreadcrumbMode();
     }
 
@@ -411,6 +420,16 @@ public partial class FilePaneControl : UserControl
         if (e.Key == Key.F && Keyboard.Modifiers == ModifierKeys.Control)
         {
             // Let it bubble up to MainWindow which handles Ctrl+F → ToggleCommandPalette
+            return;
+        }
+
+        // Ctrl+L / Alt+D / F4 → address bar (same as Explorer)
+        if ((e.Key == Key.L && Keyboard.Modifiers == ModifierKeys.Control)
+            || (e.Key == Key.System && e.SystemKey == Key.D && Keyboard.Modifiers == ModifierKeys.Alt)
+            || (e.Key == Key.F4 && Keyboard.Modifiers == ModifierKeys.None))
+        {
+            SwitchToEditMode();
+            e.Handled = true;
             return;
         }
 

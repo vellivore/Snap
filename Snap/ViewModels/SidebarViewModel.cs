@@ -30,6 +30,13 @@ public partial class SidebarViewModel : ObservableObject
     {
         if (string.IsNullOrWhiteSpace(path)) return;
 
+        // Only real directories: rejects the "::PC" sentinel and paths that no longer exist.
+        if (!Directory.Exists(path))
+        {
+            Log.Info("Sidebar.AddToday", $"not a directory, skipped: {path}");
+            return;
+        }
+
         // Pinned に既にある場合は Today に追加しない
         if (PinnedItems.Any(i => string.Equals(i.FullPath, path, StringComparison.OrdinalIgnoreCase)))
             return;
@@ -81,7 +88,11 @@ public partial class SidebarViewModel : ObservableObject
     {
         TodayItems.Clear();
         foreach (var path in paths)
+        {
+            // Drop sentinel entries saved by older versions ("::PC" / "::\PC").
+            if (string.IsNullOrWhiteSpace(path) || path.StartsWith("::")) continue;
             TodayItems.Add(CreateItem(path));
+        }
     }
 
     private static BookmarkItem CreateItem(string path)

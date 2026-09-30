@@ -2,6 +2,7 @@ using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
 using Snap.Models;
+using Snap.Services;
 using Snap.ViewModels;
 
 namespace Snap.Views;
@@ -16,6 +17,13 @@ public partial class FolderTreeControl : UserControl
     private FolderTreeViewModel? ViewModel => DataContext as FolderTreeViewModel;
 
     private async void TreeViewItem_Expanded(object sender, RoutedEventArgs e)
+    {
+        // async void event handler: nothing may escape to the dispatcher (#13).
+        try { await TreeViewItem_ExpandedAsync(sender, e); }
+        catch (Exception ex) { Log.UserError("FolderTree.Expand", "フォルダを展開できません", ex); }
+    }
+
+    private async Task TreeViewItem_ExpandedAsync(object sender, RoutedEventArgs e)
     {
         if (e.OriginalSource is TreeViewItem tvi && tvi.DataContext is TreeNode node && ViewModel != null)
         {

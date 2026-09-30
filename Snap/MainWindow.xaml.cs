@@ -7,6 +7,7 @@ using System.Windows.Input;
 using System.Windows.Interop;
 using System.Windows.Media;
 using System.Windows.Threading;
+using Snap.Helpers;
 using Snap.Models;
 using Snap.Services;
 using Snap.ViewModels;
@@ -191,6 +192,19 @@ public partial class MainWindow : Window
 
     private async void MainWindow_Loaded(object sender, RoutedEventArgs e)
     {
+        // async void event handler: nothing may escape to the dispatcher (#13).
+        try
+        {
+            await OnLoadedAsync();
+        }
+        catch (Exception ex)
+        {
+            Log.UserError("MainWindow.Loaded", "起動処理の一部に失敗しました", ex);
+        }
+    }
+
+    private async Task OnLoadedAsync()
+    {
         _settings = SettingsStore.Load();
         SettingsStore.Capture = CaptureSettings;
         RestoreWindowState(_settings);
@@ -202,6 +216,9 @@ public partial class MainWindow : Window
 
         // ブックマーク追加のルーティドイベントをキャッチ
         AddHandler(FilePaneControl.AddBookmarkRequestedEvent, new RoutedEventHandler(OnAddBookmarkRequested));
+        // Views ask MainViewModel for cross-pane work through routed events (#13).
+        AddHandler(TabPaneControl.TabMoveRequestedEvent, new RoutedEventHandler(OnTabMoveRequested));
+        AddHandler(FilePaneControl.RefreshPanesRequestedEvent, new RoutedEventHandler(OnRefreshPanesRequested));
 
         InitStatusTimer();
 
@@ -209,9 +226,6 @@ public partial class MainWindow : Window
         _usageSaveTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(30) };
         _usageSaveTimer.Tick += (s, ev) => _viewModel.UsageTracker.Save();
         _usageSaveTimer.Start();
-
-        // Wire up command palette actions
-        WireCommandPalette();
 
         // Warm up shell extension DLLs on the shell-menu worker once the UI is idle (#5).
         // Speeds up the first right-click; never shows UI, all errors swallowed.
@@ -241,7 +255,7 @@ public partial class MainWindow : Window
 
         // Tab initialization overwrote the status bar; show the load failure again.
         if (SettingsStore.LoadError is { } loadError)
-            StatusBarText.Text = loadError;
+            _viewModel.ShowStatus(loadError);
     }
 
     private void RestoreWindowState(AppSettings settings)
@@ -320,16 +334,13 @@ public partial class MainWindow : Window
 
             if (vkCode == VK_ESCAPE && _viewModel.Terminal.IsVisible)
             {
-                Dispatcher.BeginInvoke(() =>
-                {
-                    _viewModel.Terminal.Close();
-                    FloatingTerminalBorder.Visibility = Visibility.Collapsed;
-                });
+                Dispatcher.BeginInvoke(() => _viewModel.Terminal.Close());
                 return (IntPtr)1;
             }
             if (vkCode == VK_T && ctrl)
             {
-                Dispatcher.BeginInvoke(() => ToggleFloatingTerminal());
+                Dispatcher.BeginInvoke(() =>
+                    ToggleFloatingTerminalAsync().SafeFireAndForget("MainWindow.Terminal", "ターミナルを開けません"));
                 return (IntPtr)1;
             }
             if (vkCode == VK_SPACE && ctrl)
@@ -536,43 +547,31 @@ public partial class MainWindow : Window
         }
     }
 
-    // Active pane tracking
-    private FilePaneViewModel? _trackedTab;
-
+    // Active pane: MainViewModel owns it; the view only reports the click.
     private void Pane_PreviewMouseDown(object sender, MouseButtonEventArgs e)
     {
         if (sender is TabPaneControl pane && pane.DataContext is TabPaneViewModel vm)
-        {
             _viewModel.ActivePane = vm;
-            TrackActiveTab();
-        }
     }
 
-    private void TrackActiveTab()
+    private void OnTabMoveRequested(object sender, RoutedEventArgs e)
     {
-        if (_trackedTab != null)
-            _trackedTab.PropertyChanged -= OnTrackedTabChanged;
+        if (e is TabMoveRequestedEventArgs args)
+            args.Moved = _viewModel.MoveTab(args.Tab, args.Target);
+    }
 
-        _trackedTab = _viewModel.ActivePane?.SelectedTab;
-
-        if (_trackedTab != null)
-        {
-            _trackedTab.PropertyChanged += OnTrackedTabChanged;
-            StatusBarText.Text = _trackedTab.StatusMessage;
-        }
+    private void OnRefreshPanesRequested(object sender, RoutedEventArgs e)
+    {
+        if (e is RefreshPanesRequestedEventArgs args)
+            _viewModel.RefreshPanesShowing(args.Folders, args.Except)
+                .SafeFireAndForget("MainWindow.RefreshPanes", "他のペインを更新できません");
     }
 
     private void OnUserFacingError(string message)
     {
-        void Show() => StatusBarText.Text = message;
+        void Show() => _viewModel.ShowStatus(message);
         if (Dispatcher.CheckAccess()) Show();
         else Dispatcher.BeginInvoke(Show);
-    }
-
-    private void OnTrackedTabChanged(object? sender, PropertyChangedEventArgs e)
-    {
-        if (e.PropertyName == nameof(FilePaneViewModel.StatusMessage) && sender is FilePaneViewModel tab)
-            StatusBarText.Text = tab.StatusMessage;
     }
 
     // ==================== Keyboard Shortcuts ====================
@@ -597,14 +596,12 @@ public partial class MainWindow : Window
             if (_viewModel.CommandPalette.IsVisible)
             {
                 _viewModel.CommandPalette.Close();
-                CommandPaletteBorder.Visibility = Visibility.Collapsed;
                 e.Handled = true;
                 return;
             }
             if (_viewModel.Terminal.IsVisible)
             {
                 _viewModel.Terminal.Close();
-                FloatingTerminalBorder.Visibility = Visibility.Collapsed;
                 e.Handled = true;
                 return;
             }
@@ -617,75 +614,11 @@ public partial class MainWindow : Window
 
     // ==================== Command Palette ====================
 
-    private void WireCommandPalette()
-    {
-        var cp = _viewModel.CommandPalette;
-
-        cp.NavigateAction = async (path) =>
-        {
-            var pane = _viewModel.ActivePane ?? _viewModel.TopLeftPane;
-            if (pane.SelectedTab != null)
-                await pane.SelectedTab.NavigateToAsync(path);
-        };
-
-        cp.AddTabAction = async () =>
-        {
-            var pane = _viewModel.ActivePane ?? _viewModel.TopLeftPane;
-            await pane.AddTab();
-        };
-
-        cp.CloseTabAction = () =>
-        {
-            var pane = _viewModel.ActivePane ?? _viewModel.TopLeftPane;
-            if (pane.SelectedTab != null)
-                pane.CloseTab(pane.SelectedTab);
-        };
-
-        cp.RefreshAction = async () =>
-        {
-            var pane = _viewModel.ActivePane ?? _viewModel.TopLeftPane;
-            if (pane.SelectedTab != null)
-                await pane.SelectedTab.Refresh();
-        };
-
-        cp.OpenSettingsAction = () =>
-        {
-            var settingsPath = SettingsStore.SettingsPath;
-            try
-            {
-                Process.Start(new ProcessStartInfo(settingsPath) { UseShellExecute = true });
-            }
-            catch (Exception ex) { Log.UserError("MainWindow.OpenSettings", $"設定ファイルを開けません（{settingsPath}）", ex); }
-        };
-
-        cp.OpenTerminalAction = () =>
-        {
-            var dir = _viewModel.ActivePane?.SelectedTab?.CurrentPath ?? @"C:\";
-            try
-            {
-                Process.Start(new ProcessStartInfo("pwsh.exe")
-                {
-                    WorkingDirectory = dir,
-                    UseShellExecute = true,
-                });
-            }
-            catch (Exception ex) { Log.UserError("MainWindow.OpenTerminal", $"pwsh を起動できません（{dir}）", ex); }
-        };
-    }
-
     private void ToggleCommandPalette()
     {
-        var cp = _viewModel.CommandPalette;
+        _viewModel.ToggleCommandPalette();
 
-        // Sync current directory
-        var activeTab = _viewModel.ActivePane?.SelectedTab;
-        if (activeTab != null)
-            cp.CurrentDirectory = activeTab.CurrentPath;
-
-        cp.Toggle();
-        CommandPaletteBorder.Visibility = cp.IsVisible ? Visibility.Visible : Visibility.Collapsed;
-
-        if (cp.IsVisible)
+        if (_viewModel.CommandPalette.IsVisible)
         {
             CommandPaletteInput.Focus();
             CommandPaletteInput.SelectAll();
@@ -696,63 +629,65 @@ public partial class MainWindow : Window
     {
         var cp = _viewModel.CommandPalette;
 
-        switch (e.Key)
+        try
         {
-            case Key.Escape:
-                cp.Close();
-                CommandPaletteBorder.Visibility = Visibility.Collapsed;
-                e.Handled = true;
-                break;
-            case Key.Down:
-                cp.SelectNext();
-                if (cp.SelectedItem != null)
-                    CommandPaletteResults.ScrollIntoView(cp.SelectedItem);
-                e.Handled = true;
-                break;
-            case Key.Up:
-                cp.SelectPrevious();
-                if (cp.SelectedItem != null)
-                    CommandPaletteResults.ScrollIntoView(cp.SelectedItem);
-                e.Handled = true;
-                break;
-            case Key.Enter:
-                await cp.ExecuteSelected();
-                CommandPaletteBorder.Visibility = Visibility.Collapsed;
-                e.Handled = true;
-                break;
+            switch (e.Key)
+            {
+                case Key.Escape:
+                    cp.Close();
+                    e.Handled = true;
+                    break;
+                case Key.Down:
+                    cp.SelectNext();
+                    if (cp.SelectedItem != null)
+                        CommandPaletteResults.ScrollIntoView(cp.SelectedItem);
+                    e.Handled = true;
+                    break;
+                case Key.Up:
+                    cp.SelectPrevious();
+                    if (cp.SelectedItem != null)
+                        CommandPaletteResults.ScrollIntoView(cp.SelectedItem);
+                    e.Handled = true;
+                    break;
+                case Key.Enter:
+                    await cp.ExecuteSelected();
+                    e.Handled = true;
+                    break;
+            }
         }
+        catch (Exception ex) { Log.UserError("CommandPalette.Execute", "コマンドを実行できません", ex); }
     }
 
     private async void CommandPaletteResults_PreviewMouseLeftButtonUp(object sender, MouseButtonEventArgs e)
     {
         var cp = _viewModel.CommandPalette;
-        if (cp.SelectedItem != null)
+        try
         {
-            await cp.ExecuteSelected();
-            CommandPaletteBorder.Visibility = Visibility.Collapsed;
+            if (cp.SelectedItem != null)
+                await cp.ExecuteSelected();
         }
+        catch (Exception ex) { Log.UserError("CommandPalette.Execute", "コマンドを実行できません", ex); }
     }
 
     // ==================== Floating Terminal ====================
 
-    private async void ToggleFloatingTerminal()
+    private async Task ToggleFloatingTerminalAsync()
     {
         var term = _viewModel.Terminal;
 
         if (term.IsVisible)
         {
             term.Close();
-            FloatingTerminalBorder.Visibility = Visibility.Collapsed;
             return;
         }
 
         // Sync current directory
-        var activeTab = _viewModel.ActivePane?.SelectedTab;
+        var activeTab = _viewModel.ActiveTab;
         if (activeTab != null)
             term.CurrentDirectory = activeTab.CurrentPath;
 
-        // Make visible FIRST so HwndHost gets initialized via layout
-        FloatingTerminalBorder.Visibility = Visibility.Visible;
+        // Make visible FIRST (the border is bound to IsVisible) so HwndHost gets initialized via layout
+        term.IsVisible = true;
 
         // Wait for layout to complete (HwndHost.BuildWindowCore)
         await Dispatcher.InvokeAsync(() => { }, System.Windows.Threading.DispatcherPriority.Loaded);
@@ -770,10 +705,10 @@ public partial class MainWindow : Window
     {
         var term = _viewModel.Terminal;
         term.ShellWindowReady -= OnShellWindowReady;
-        EmbedTerminalAsync(term);
+        EmbedTerminalAsync(term).SafeFireAndForget("MainWindow.Terminal", "ターミナルを埋め込めません");
     }
 
-    private async void EmbedTerminalAsync(FloatingTerminalViewModel term)
+    private async Task EmbedTerminalAsync(FloatingTerminalViewModel term)
     {
         // HwndHost の BuildWindowCore 完了をポーリングで待つ（最大2秒）
         IntPtr hostHwnd = IntPtr.Zero;
@@ -808,6 +743,5 @@ public partial class MainWindow : Window
     private void TerminalClose_Click(object sender, RoutedEventArgs e)
     {
         _viewModel.Terminal.Close();
-        FloatingTerminalBorder.Visibility = Visibility.Collapsed;
     }
 }

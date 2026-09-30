@@ -363,6 +363,12 @@ public partial class TabPaneControl : UserControl
         }
     }
 
+    /// <summary>Asks the window to move a tab here from another pane
+    /// (<see cref="TabMoveRequestedEventArgs"/>); handled by MainViewModel.MoveTab.</summary>
+    public static readonly RoutedEvent TabMoveRequestedEvent =
+        EventManager.RegisterRoutedEvent("TabMoveRequested", RoutingStrategy.Bubble,
+            typeof(RoutedEventHandler), typeof(TabPaneControl));
+
     private void Grid_TabDrop(object sender, DragEventArgs e)
     {
         if (!e.Data.GetDataPresent("SnapTabDrag")) return;
@@ -374,37 +380,20 @@ public partial class TabPaneControl : UserControl
         // 同じペイン内のタブ移動は TabHeader_Drop で処理済み
         if (targetPaneVm.Tabs.Contains(sourceTab)) return;
 
-        // 元のペインを探して削除
-        var window = Window.GetWindow(this);
-        if (window?.DataContext is not ViewModels.MainViewModel mainVm) return;
-
-        var allPanes = new[] { mainVm.TopLeftPane, mainVm.TopRightPane, mainVm.BottomLeftPane, mainVm.BottomRightPane };
-        TabPaneViewModel? sourcePaneVm = null;
-        foreach (var pane in allPanes)
-        {
-            if (pane.Tabs.Contains(sourceTab))
-            {
-                sourcePaneVm = pane;
-                break;
-            }
-        }
-
-        if (sourcePaneVm == null) return;
-
-        // 元のペインの最後のタブは移動しない（空ペインになるため）
-        if (sourcePaneVm.Tabs.Count <= 1) return;
-
-        // Removing from an ObservableCollection does not auto-null SelectedTab, so if the
-        // moved tab was selected we must repoint it — otherwise the source pane keeps a
-        // SelectedTab that is no longer in its Tabs list.
-        var wasSelected = sourcePaneVm.SelectedTab == sourceTab;
-        sourcePaneVm.Tabs.Remove(sourceTab);
-        if ((wasSelected || sourcePaneVm.SelectedTab == null) && sourcePaneVm.Tabs.Count > 0)
-            sourcePaneVm.SelectedTab = sourcePaneVm.Tabs[0];
-
-        targetPaneVm.Tabs.Add(sourceTab);
-        targetPaneVm.SelectedTab = sourceTab;
-
-        e.Handled = true;
+        // 元のペインからの取り外しと移動先での選択は MainViewModel が行う
+        var request = new TabMoveRequestedEventArgs(TabMoveRequestedEvent, this, sourceTab, targetPaneVm);
+        RaiseEvent(request);
+        if (request.Moved)
+            e.Handled = true;
     }
+}
+
+/// <summary>A request to move <see cref="Tab"/> into <see cref="Target"/>; the handler sets <see cref="Moved"/>.</summary>
+public sealed class TabMoveRequestedEventArgs(
+    RoutedEvent routedEvent, object source, FilePaneViewModel tab, TabPaneViewModel target)
+    : RoutedEventArgs(routedEvent, source)
+{
+    public FilePaneViewModel Tab { get; } = tab;
+    public TabPaneViewModel Target { get; } = target;
+    public bool Moved { get; set; }
 }

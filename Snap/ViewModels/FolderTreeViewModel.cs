@@ -19,81 +19,94 @@ public partial class FolderTreeViewModel : ObservableObject
     /// </summary>
     public event Action<string>? FolderSelected;
 
+    /// <summary>Builds the tree roots (Desktop / Documents / Downloads / PC). A failure is logged
+    /// and leaves the tree empty; the rest of the app keeps starting (#13).</summary>
     public async Task InitializeAsync()
     {
-        await Task.Run(() =>
+        List<TreeNode> roots;
+        try
         {
-            var roots = new List<TreeNode>();
-
-            // デスクトップ
-            var desktop = Environment.GetFolderPath(Environment.SpecialFolder.Desktop);
-            if (Directory.Exists(desktop))
-            {
-                var node = CreateNode(Path.GetFileName(desktop), desktop);
-                roots.Add(node);
-            }
-
-            // ドキュメント
-            var docs = Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments);
-            if (Directory.Exists(docs))
-            {
-                var node = CreateNode(Path.GetFileName(docs), docs);
-                roots.Add(node);
-            }
-
-            // ダウンロード
-            var downloads = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Downloads");
-            if (Directory.Exists(downloads))
-            {
-                var node = CreateNode("Downloads", downloads);
-                roots.Add(node);
-            }
-
-            // PC ノード（ドライブ一覧を子に持つ）
-            var pcNode = new TreeNode { Name = "PC", FullPath = FilePaneViewModel.PcViewPath };
-            pcNode.RemoveDummyChild(); // ダミー子を除去、直接ドライブを追加
-            foreach (var drive in DriveInfo.GetDrives())
-            {
-                try
-                {
-                    var label = drive.IsReady
-                        ? $"{drive.VolumeLabel} ({drive.Name.TrimEnd('\\')})"
-                        : drive.Name.TrimEnd('\\');
-                    var driveNode = CreateNode(label, drive.Name);
-                    pcNode.Children.Add(driveNode);
-                }
-                catch (Exception ex)
-                {
-                    // ドライブ情報取得失敗は無視
-                    Log.Warn("FolderTree.Drives", drive.Name, ex);
-                }
-            }
-            roots.Add(pcNode);
-
-            return roots;
-        }).ContinueWith(t =>
+            roots = await Task.Run(BuildRootNodes);
+        }
+        catch (Exception ex)
         {
-            if (t.Result != null)
+            Log.Error("FolderTree.Initialize", "folder tree roots could not be built", ex);
+            return;
+        }
+
+        foreach (var node in roots)
+        {
+            try
             {
-                foreach (var node in t.Result)
+                if (node.FullPath == FilePaneViewModel.PcViewPath)
                 {
-                    if (node.FullPath == FilePaneViewModel.PcViewPath)
+                    // PC ノード自体にはアイコンなし、子ノード（ドライブ）にアイコンを設定
+                    foreach (var child in node.Children)
                     {
-                        // PC ノード自体にはアイコンなし、子ノード（ドライブ）にアイコンを設定
-                        foreach (var child in node.Children)
-                        {
-                            child.Icon = IconHelper.GetIconAndType(child.FullPath, true).icon;
-                        }
-                        node.IsExpanded = true;
+                        child.Icon = IconHelper.GetIconAndType(child.FullPath, true).icon;
                     }
-                    else
-                    {
-                        node.Icon = IconHelper.GetIconAndType(node.FullPath, true).icon;
-                    }
-                    RootNodes.Add(node);
+                    node.IsExpanded = true;
+                }
+                else
+                {
+                    node.Icon = IconHelper.GetIconAndType(node.FullPath, true).icon;
                 }
             }
-        }, TaskScheduler.FromCurrentSynchronizationContext());
+            catch (Exception ex) { Log.Warn("FolderTree.Initialize", $"icon: {node.FullPath}", ex); }
+            RootNodes.Add(node);
+        }
+    }
+
+    private List<TreeNode> BuildRootNodes()
+    {
+        var roots = new List<TreeNode>();
+
+        // デスクトップ
+        var desktop = Environment.GetFolderPath(Environment.SpecialFolder.Desktop);
+        if (Directory.Exists(desktop))
+        {
+            var node = CreateNode(Path.GetFileName(desktop), desktop);
+            roots.Add(node);
+        }
+
+        // ドキュメント
+        var docs = Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments);
+        if (Directory.Exists(docs))
+        {
+            var node = CreateNode(Path.GetFileName(docs), docs);
+            roots.Add(node);
+        }
+
+        // ダウンロード
+        var downloads = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Downloads");
+        if (Directory.Exists(downloads))
+        {
+            var node = CreateNode("Downloads", downloads);
+            roots.Add(node);
+        }
+
+        // PC ノード（ドライブ一覧を子に持つ）
+        var pcNode = new TreeNode { Name = "PC", FullPath = FilePaneViewModel.PcViewPath };
+        pcNode.RemoveDummyChild(); // ダミー子を除去、直接ドライブを追加
+        foreach (var drive in DriveInfo.GetDrives())
+        {
+            try
+            {
+                var label = drive.IsReady
+                    ? $"{drive.VolumeLabel} ({drive.Name.TrimEnd('\\')})"
+                    : drive.Name.TrimEnd('\\');
+                var driveNode = CreateNode(label, drive.Name);
+                pcNode.Children.Add(driveNode);
+            }
+            catch (Exception ex)
+            {
+                // ドライブ情報取得失敗は無視
+                Log.Warn("FolderTree.Drives", drive.Name, ex);
+            }
+        }
+        roots.Add(pcNode);
+
+        return roots;
     }
 
     public async Task ExpandNodeAsync(TreeNode node)

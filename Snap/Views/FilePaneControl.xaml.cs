@@ -39,6 +39,12 @@ public partial class FilePaneControl : UserControl
         remove => RemoveHandler(AddBookmarkRequestedEvent, value);
     }
 
+    /// <summary>Asks the window to refresh the other panes showing some folders
+    /// (<see cref="RefreshPanesRequestedEventArgs"/>); handled by MainViewModel.RefreshPanesShowing.</summary>
+    public static readonly RoutedEvent RefreshPanesRequestedEvent =
+        EventManager.RegisterRoutedEvent("RefreshPanesRequested", RoutingStrategy.Bubble,
+            typeof(RoutedEventHandler), typeof(FilePaneControl));
+
     // Column header display name → sort property mapping
     private static readonly Dictionary<string, string> ColumnMap = new()
     {
@@ -300,6 +306,13 @@ public partial class FilePaneControl : UserControl
 
     private async void BreadcrumbSegment_Click(object sender, RoutedEventArgs e)
     {
+        // async void event handler: nothing may escape to the dispatcher (#13).
+        try { await BreadcrumbSegment_ClickAsync(sender, e); }
+        catch (Exception ex) { Log.UserError("FilePane.BreadcrumbSegment_Click", "操作に失敗しました", ex); }
+    }
+
+    private async Task BreadcrumbSegment_ClickAsync(object sender, RoutedEventArgs e)
+    {
         if (sender is Button btn && btn.Tag is string path && ViewModel is { } vm)
         {
             await vm.NavigateToAsync(path);
@@ -335,6 +348,13 @@ public partial class FilePaneControl : UserControl
 
     private async void AddressBar_KeyDown(object sender, KeyEventArgs e)
     {
+        // async void event handler: nothing may escape to the dispatcher (#13).
+        try { await AddressBar_KeyDownAsync(sender, e); }
+        catch (Exception ex) { Log.UserError("FilePane.AddressBar_KeyDown", "操作に失敗しました", ex); }
+    }
+
+    private async Task AddressBar_KeyDownAsync(object sender, KeyEventArgs e)
+    {
         if (e.Key == Key.Enter)
         {
             e.Handled = true;
@@ -363,6 +383,13 @@ public partial class FilePaneControl : UserControl
 
     private async void FilePaneControl_MouseDown(object sender, MouseButtonEventArgs e)
     {
+        // async void event handler: nothing may escape to the dispatcher (#13).
+        try { await FilePaneControl_MouseDownAsync(sender, e); }
+        catch (Exception ex) { Log.UserError("FilePane.FilePaneControl_MouseDown", "操作に失敗しました", ex); }
+    }
+
+    private async Task FilePaneControl_MouseDownAsync(object sender, MouseButtonEventArgs e)
+    {
         if (ViewModel == null) return;
         if (e.ChangedButton == MouseButton.XButton1)
         {
@@ -377,6 +404,13 @@ public partial class FilePaneControl : UserControl
     }
 
     private async void ListView_MouseDoubleClick(object sender, MouseButtonEventArgs e)
+    {
+        // async void event handler: nothing may escape to the dispatcher (#13).
+        try { await ListView_MouseDoubleClickAsync(sender, e); }
+        catch (Exception ex) { Log.UserError("FilePane.ListView_MouseDoubleClick", "操作に失敗しました", ex); }
+    }
+
+    private async Task ListView_MouseDoubleClickAsync(object sender, MouseButtonEventArgs e)
     {
         // ダブルクリック位置がアイテム上かどうかを判定
         var hitElement = e.OriginalSource as DependencyObject;
@@ -412,6 +446,13 @@ public partial class FilePaneControl : UserControl
     }
 
     private async void UserControl_KeyDown(object sender, KeyEventArgs e)
+    {
+        // async void event handler: nothing may escape to the dispatcher (#13).
+        try { await UserControl_KeyDownAsync(sender, e); }
+        catch (Exception ex) { Log.UserError("FilePane.UserControl_KeyDown", "操作に失敗しました", ex); }
+    }
+
+    private async Task UserControl_KeyDownAsync(object sender, KeyEventArgs e)
     {
         var vm = ViewModel;
         if (vm == null) return;
@@ -576,7 +617,7 @@ public partial class FilePaneControl : UserControl
                     PendingBookmarkPath = bgPath;
                     RaiseEvent(new RoutedEventArgs(AddBookmarkRequestedEvent, this));
                 }),
-                new("更新", () => Dispatcher.BeginInvoke(async () => { if (vm != null) await vm.Refresh(); })),
+                new("更新", () => Dispatcher.BeginInvoke(() => vm?.Refresh().SafeFireAndForget("FilePane.Refresh", "更新できません"))),
             };
         }
 
@@ -592,7 +633,7 @@ public partial class FilePaneControl : UserControl
             foreach (var pane in allPanes) pane.SetAllowDrop(false);
             _shellMenuOpen = true;
 
-            Action onRefresh = () => Dispatcher.BeginInvoke(async () => { if (vm != null) await vm.Refresh(); });
+            Action onRefresh = () => Dispatcher.BeginInvoke(() => vm?.Refresh().SafeFireAndForget("FilePane.Refresh", "更新できません"));
             Action onMenuReady = () => Mouse.OverrideCursor = null;
 
             if (paths != null)
@@ -827,8 +868,7 @@ public partial class FilePaneControl : UserControl
             // Refresh all panes that might be affected
             try { await vm.Refresh(); }
             catch (Exception ex) { Log.Warn("FilePane.Drop", "refresh after drop failed", ex); }
-            try { await RefreshOtherPanesShowingPaths(sourcePaths, vm); }
-            catch (Exception ex) { Log.Warn("FilePane.Drop", "refresh of other panes failed", ex); }
+            RequestRefreshOfSourceFolders(sourcePaths, vm);
         }
         catch (Exception ex)
         {
@@ -862,38 +902,27 @@ public partial class FilePaneControl : UserControl
     }
 
     /// <summary>
-    /// ドラッグ元のフォルダを表示している他のペインを更新する。
+    /// ドラッグ元のフォルダを表示している他のペインの更新を MainViewModel に頼む。
     /// </summary>
-    private async Task RefreshOtherPanesShowingPaths(string[] sourcePaths, FilePaneViewModel excludeVm)
+    private void RequestRefreshOfSourceFolders(string[] sourcePaths, FilePaneViewModel excludeVm)
     {
-        // Collect unique source directories
         var sourceDirs = sourcePaths
             .Select(p => Path.GetDirectoryName(p))
             .Where(d => d != null)
+            .Select(d => d!)
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .ToList();
 
         if (sourceDirs.Count == 0) return;
-
-        // Walk up the visual tree to find the Window, then find all FilePaneViewModels
-        var window = Window.GetWindow(this);
-        if (window?.DataContext is not ViewModels.MainViewModel mainVm) return;
-
-        var allPanes = new[]
-        {
-            mainVm.TopLeftPane, mainVm.TopRightPane,
-            mainVm.BottomLeftPane, mainVm.BottomRightPane
-        };
-
-        foreach (var pane in allPanes)
-        {
-            if (pane?.SelectedTab == null || pane.SelectedTab == excludeVm) continue;
-
-            var tab = pane.SelectedTab;
-            if (sourceDirs.Any(d => string.Equals(d, tab.CurrentPath, StringComparison.OrdinalIgnoreCase)))
-            {
-                await tab.Refresh();
-            }
-        }
+        RaiseEvent(new RefreshPanesRequestedEventArgs(RefreshPanesRequestedEvent, this, sourceDirs, excludeVm));
     }
+}
+
+/// <summary>Folders whose panes should be refreshed, and the tab that already was.</summary>
+public sealed class RefreshPanesRequestedEventArgs(
+    RoutedEvent routedEvent, object source, IReadOnlyList<string> folders, FilePaneViewModel? except)
+    : RoutedEventArgs(routedEvent, source)
+{
+    public IReadOnlyList<string> Folders { get; } = folders;
+    public FilePaneViewModel? Except { get; } = except;
 }

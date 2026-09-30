@@ -1,7 +1,9 @@
 using System.Collections.ObjectModel;
 using System.ComponentModel;
+using System.Diagnostics;
 using System.Windows.Threading;
 using CommunityToolkit.Mvvm.ComponentModel;
+using Snap.Helpers;
 using Snap.Models;
 using Snap.Services;
 
@@ -20,10 +22,24 @@ public partial class MainViewModel : ObservableObject
     public FloatingTerminalViewModel Terminal { get; } = new();
     public SidebarViewModel Sidebar { get; } = new();
 
+    /// <summary>The four panes in a fixed order (top-left, top-right, bottom-left, bottom-right).</summary>
+    public IReadOnlyList<TabPaneViewModel> AllPanes { get; }
+
+    /// <summary>The pane that commands, the tree and the sidebar act on. The only source of truth:
+    /// views set it (mouse down / keyboard focus) and never track it themselves.</summary>
     [ObservableProperty]
     private TabPaneViewModel? _activePane;
 
-    private FilePaneViewModel? _trackedTab;
+    /// <summary>The selected tab of <see cref="ActivePane"/> (follows tab switches too).</summary>
+    [ObservableProperty]
+    private FilePaneViewModel? _activeTab;
+
+    /// <summary>Status bar text: the active tab's status, or a user-facing error.</summary>
+    [ObservableProperty]
+    private string _statusText = string.Empty;
+
+    // True after InitializeAsync: from then on tab changes sync the tree and feed Today.
+    private bool _initialized;
 
     // Delay timer: only add to Today after staying 2s in the same folder
     private readonly DispatcherTimer _todayTimer;
@@ -31,6 +47,11 @@ public partial class MainViewModel : ObservableObject
 
     public MainViewModel()
     {
+        AllPanes = [TopLeftPane, TopRightPane, BottomLeftPane, BottomRightPane];
+
+        CommandPalette.NavigateAction = NavigateActiveTabAsync;
+        CommandPalette.Commands = BuildPaletteCommands();
+
         _todayTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(1) };
         _todayTimer.Tick += (s, e) =>
         {
@@ -77,7 +98,9 @@ public partial class MainViewModel : ObservableObject
         );
 
         FolderTree.FolderSelected += OnTreeFolderSelected;
-        TrackActivePane();
+        _initialized = true;
+        if (ActiveTab != null)
+            FolderTree.SyncToPathAsync(ActiveTab.CurrentPath).SafeFireAndForget("Main.TreeSync", "ツリーを同期できません");
         WatchPersistedState();
     }
 
@@ -129,8 +152,6 @@ public partial class MainViewModel : ObservableObject
         };
     }
 
-    private TabPaneViewModel[] AllPanes => [TopLeftPane, TopRightPane, BottomLeftPane, BottomRightPane];
-
     /// <summary>Collects current pane state for persistence.</summary>
     public PanesSettings GetPanesState()
     {
@@ -149,51 +170,47 @@ public partial class MainViewModel : ObservableObject
         };
     }
 
-    partial void OnActivePaneChanged(TabPaneViewModel? value)
-    {
-        TrackActivePane();
-    }
+    // ==================== Active pane / tab (#13) ====================
 
-    private void TrackActivePane()
+    partial void OnActivePaneChanged(TabPaneViewModel? oldValue, TabPaneViewModel? newValue)
     {
-        if (_trackedTab != null)
-            _trackedTab.PropertyChanged -= OnTrackedTabPropertyChanged;
-
-        if (ActivePane != null)
-        {
-            ActivePane.PropertyChanged -= OnActivePanePropertyChanged;
-            ActivePane.PropertyChanged += OnActivePanePropertyChanged;
-            WatchSelectedTab();
-        }
+        if (oldValue != null)
+            oldValue.PropertyChanged -= OnActivePanePropertyChanged;
+        if (newValue != null)
+            newValue.PropertyChanged += OnActivePanePropertyChanged;
+        ActiveTab = newValue?.SelectedTab;
     }
 
     private void OnActivePanePropertyChanged(object? sender, PropertyChangedEventArgs e)
     {
         if (e.PropertyName == nameof(TabPaneViewModel.SelectedTab))
-            WatchSelectedTab();
+            ActiveTab = ActivePane?.SelectedTab;
     }
 
-    private void WatchSelectedTab()
+    partial void OnActiveTabChanged(FilePaneViewModel? oldValue, FilePaneViewModel? newValue)
     {
-        if (_trackedTab != null)
-            _trackedTab.PropertyChanged -= OnTrackedTabPropertyChanged;
+        if (oldValue != null)
+            oldValue.PropertyChanged -= OnActiveTabPropertyChanged;
 
-        _trackedTab = ActivePane?.SelectedTab;
-
-        if (_trackedTab != null)
-        {
-            _trackedTab.PropertyChanged += OnTrackedTabPropertyChanged;
-            _ = FolderTree.SyncToPathAsync(_trackedTab.CurrentPath);
-        }
+        if (newValue == null) return;
+        newValue.PropertyChanged += OnActiveTabPropertyChanged;
+        StatusText = newValue.StatusMessage;
+        if (_initialized)
+            FolderTree.SyncToPathAsync(newValue.CurrentPath).SafeFireAndForget("Main.TreeSync", "ツリーを同期できません");
     }
 
-    private async void OnTrackedTabPropertyChanged(object? sender, PropertyChangedEventArgs e)
+    private async void OnActiveTabPropertyChanged(object? sender, PropertyChangedEventArgs e)
     {
         // async void event handler: an unhandled exception here would crash the app,
         // so swallow at the top level (SyncToPathAsync already logs/handles internally).
         try
         {
-            if (e.PropertyName == nameof(FilePaneViewModel.CurrentPath) && sender is FilePaneViewModel tab)
+            if (sender is not FilePaneViewModel tab) return;
+            if (e.PropertyName == nameof(FilePaneViewModel.StatusMessage))
+            {
+                StatusText = tab.StatusMessage;
+            }
+            else if (e.PropertyName == nameof(FilePaneViewModel.CurrentPath) && _initialized)
             {
                 await FolderTree.SyncToPathAsync(tab.CurrentPath);
                 // Start 2s timer — only add to Today if user stays in this folder
@@ -205,11 +222,131 @@ public partial class MainViewModel : ObservableObject
         catch (Exception ex) { Log.Warn("Main.TrackedTabChanged", "tree sync / today timer failed", ex); }
     }
 
+    /// <summary>Shows a message in the status bar (until the active tab reports a new status).</summary>
+    public void ShowStatus(string message) => StatusText = message;
+
+    /// <summary>The pane commands act on: the active one, or top-left before any is chosen.</summary>
+    private TabPaneViewModel CurrentPane => ActivePane ?? TopLeftPane;
+
+    /// <summary>The pane whose tab list contains <paramref name="tab"/>, or null.</summary>
+    public TabPaneViewModel? FindPaneOf(FilePaneViewModel tab) =>
+        AllPanes.FirstOrDefault(p => p.Tabs.Contains(tab));
+
+    /// <summary>
+    /// Moves <paramref name="tab"/> from its pane to <paramref name="target"/> and selects it there.
+    /// Refused (false) when the tab is already in the target or is the source pane's last tab.
+    /// </summary>
+    public bool MoveTab(FilePaneViewModel tab, TabPaneViewModel target)
+    {
+        if (target.Tabs.Contains(tab)) return false;
+
+        var source = FindPaneOf(tab);
+        if (source == null) return false;
+
+        // The source pane's last tab is not moved (the pane would be left empty).
+        if (source.Tabs.Count <= 1) return false;
+
+        // Removing from an ObservableCollection does not auto-null SelectedTab, so if the
+        // moved tab was selected we must repoint it — otherwise the source pane keeps a
+        // SelectedTab that is no longer in its Tabs list.
+        var wasSelected = source.SelectedTab == tab;
+        source.Tabs.Remove(tab);
+        if ((wasSelected || source.SelectedTab == null) && source.Tabs.Count > 0)
+            source.SelectedTab = source.Tabs[0];
+
+        target.Tabs.Add(tab);
+        target.SelectedTab = tab;
+        return true;
+    }
+
+    /// <summary>Refreshes every pane whose selected tab shows one of <paramref name="folders"/>
+    /// (except <paramref name="except"/>), e.g. the source folders after a move.</summary>
+    public async Task RefreshPanesShowing(IEnumerable<string> folders, FilePaneViewModel? except = null)
+    {
+        var list = folders.Where(f => !string.IsNullOrEmpty(f)).ToList();
+        if (list.Count == 0) return;
+
+        foreach (var pane in AllPanes)
+        {
+            var tab = pane.SelectedTab;
+            if (tab == null || tab == except) continue;
+            if (list.Any(f => string.Equals(f, tab.CurrentPath, StringComparison.OrdinalIgnoreCase)))
+                await tab.Refresh();
+        }
+    }
+
+    /// <inheritdoc cref="RefreshPanesShowing(IEnumerable{string}, FilePaneViewModel?)"/>
+    public Task RefreshPanesShowing(string folder, FilePaneViewModel? except = null) =>
+        RefreshPanesShowing([folder], except);
+
+    // ==================== Command palette (#13) ====================
+
+    /// <summary>The palette's app commands. Adding a command = adding one entry here.</summary>
+    private IReadOnlyList<PaletteCommand> BuildPaletteCommands() =>
+    [
+        new("new tab", "New Tab", "\uE710", () => CurrentPane.AddTab()),
+        new("close tab", "Close Tab", "\uE711", () =>
+        {
+            var pane = CurrentPane;
+            if (pane.SelectedTab != null)
+                pane.CloseTab(pane.SelectedTab);
+            return Task.CompletedTask;
+        }),
+        new("refresh", "Refresh", "\uE72C", () => CurrentPane.SelectedTab?.Refresh() ?? Task.CompletedTask),
+        new("settings", "Open settings.json", "\uE713", () =>
+        {
+            OpenSettingsFile();
+            return Task.CompletedTask;
+        }),
+        new("terminal", "Open Terminal Here", "\uE756", () =>
+        {
+            OpenExternalTerminal();
+            return Task.CompletedTask;
+        }),
+    ];
+
+    private Task NavigateActiveTabAsync(string path) =>
+        CurrentPane.SelectedTab?.NavigateToAsync(path) ?? Task.CompletedTask;
+
+    private static void OpenSettingsFile()
+    {
+        var settingsPath = SettingsStore.SettingsPath;
+        try
+        {
+            Process.Start(new ProcessStartInfo(settingsPath) { UseShellExecute = true });
+        }
+        catch (Exception ex) { Log.UserError("MainWindow.OpenSettings", $"設定ファイルを開けません（{settingsPath}）", ex); }
+    }
+
+    private void OpenExternalTerminal()
+    {
+        var dir = ActivePane?.SelectedTab?.CurrentPath ?? @"C:\";
+        try
+        {
+            Process.Start(new ProcessStartInfo("pwsh.exe")
+            {
+                WorkingDirectory = dir,
+                UseShellExecute = true,
+            });
+        }
+        catch (Exception ex) { Log.UserError("MainWindow.OpenTerminal", $"pwsh を起動できません（{dir}）", ex); }
+    }
+
+    /// <summary>Opens / closes the palette, searching from the active tab's folder.</summary>
+    public void ToggleCommandPalette()
+    {
+        if (ActiveTab != null)
+            CommandPalette.CurrentDirectory = ActiveTab.CurrentPath;
+        CommandPalette.Toggle();
+    }
+
+    // ==================== Tree / sidebar navigation ====================
+
     private async void OnTreeFolderSelected(string path)
     {
         try
         {
-            var pane = ActivePane ?? TopLeftPane;
+            var pane = CurrentPane;
             if (pane.SelectedTab != null)
             {
                 await pane.SelectedTab.NavigateToAsync(path);
@@ -222,7 +359,7 @@ public partial class MainViewModel : ObservableObject
     {
         try
         {
-            var pane = ActivePane ?? TopLeftPane;
+            var pane = CurrentPane;
             if (pane.SelectedTab != null)
             {
                 await pane.SelectedTab.NavigateToAsync(path);

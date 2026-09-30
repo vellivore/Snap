@@ -134,6 +134,7 @@
             <Border Grid.Row="2" Background="#A0181820" BorderBrush="#30AAAACC" BorderThickness="0,1,0,0">
                 <DockPanel Margin="12,3">
                     <TextBlock x:Name="StatusBarText"
+                               Text="{Binding StatusText}"
                                DockPanel.Dock="Left"
                                FontSize="11" Foreground="#808080"
                                VerticalAlignment="Center"/>
@@ -151,7 +152,7 @@
             <!-- Shadow layer (separate so text stays hardware-rendered) -->
             <Border x:Name="CommandPaletteBorder"
                     Grid.Row="0" Grid.RowSpan="3"
-                    Visibility="Collapsed"
+                    Visibility="{Binding CommandPalette.IsVisible, Converter={x:Static local:BoolToVisibleConverter.Instance}}"
                     HorizontalAlignment="Center"
                     VerticalAlignment="Top"
                     Margin="0,48,0,0"
@@ -290,7 +291,7 @@
             <!-- ==================== Floating Terminal (embedded pwsh) ==================== -->
             <Border x:Name="FloatingTerminalBorder"
                     Grid.Row="0" Grid.RowSpan="3"
-                    Visibility="Collapsed"
+                    Visibility="{Binding Terminal.IsVisible, Converter={x:Static local:BoolToVisibleConverter.Instance}}"
                     HorizontalAlignment="Center"
                     VerticalAlignment="Center"
                     Width="800"

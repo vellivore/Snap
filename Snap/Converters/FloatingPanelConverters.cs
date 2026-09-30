@@ -47,3 +47,15 @@ public class NonEmptyToVisibleConverter : IValueConverter
     public object ConvertBack(object value, Type targetType, object parameter, CultureInfo culture)
         => throw new NotImplementedException();
 }
+
+/// <summary>true → Visible, anything else → Collapsed (floating panels bound to a VM's IsVisible).</summary>
+public class BoolToVisibleConverter : IValueConverter
+{
+    public static readonly BoolToVisibleConverter Instance = new();
+
+    public object Convert(object value, Type targetType, object parameter, CultureInfo culture)
+        => value is true ? Visibility.Visible : Visibility.Collapsed;
+
+    public object ConvertBack(object value, Type targetType, object parameter, CultureInfo culture)
+        => throw new NotImplementedException();
+}

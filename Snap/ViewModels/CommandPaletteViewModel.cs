@@ -3,6 +3,7 @@ using System.IO;
 using System.Windows;
 using System.Windows.Threading;
 using CommunityToolkit.Mvvm.ComponentModel;
+using Snap.Helpers;
 using Snap.Models;
 
 namespace Snap.ViewModels;
@@ -36,20 +37,8 @@ public partial class CommandPaletteViewModel : ObservableObject
     /// <summary>Callback to navigate the active pane to a path.</summary>
     public Func<string, Task>? NavigateAction { get; set; }
 
-    /// <summary>Callback to add a new tab.</summary>
-    public Func<Task>? AddTabAction { get; set; }
-
-    /// <summary>Callback to close the current tab.</summary>
-    public Action? CloseTabAction { get; set; }
-
-    /// <summary>Callback to refresh the active pane.</summary>
-    public Func<Task>? RefreshAction { get; set; }
-
-    /// <summary>Callback to open settings file.</summary>
-    public Action? OpenSettingsAction { get; set; }
-
-    /// <summary>Callback to open Windows Terminal at current directory.</summary>
-    public Action? OpenTerminalAction { get; set; }
+    /// <summary>App commands offered in "/" mode (built by MainViewModel).</summary>
+    public IReadOnlyList<PaletteCommand> Commands { get; set; } = [];
 
     private CancellationTokenSource? _searchCts;
     private readonly DispatcherTimer _debounceTimer;
@@ -61,7 +50,7 @@ public partial class CommandPaletteViewModel : ObservableObject
         _debounceTimer.Tick += (s, e) =>
         {
             _debounceTimer.Stop();
-            _ = UpdateResultsAsync(_pendingQuery);
+            UpdateResultsAsync(_pendingQuery).SafeFireAndForget("CommandPalette.Search", "検索に失敗しました");
         };
     }
 
@@ -107,7 +96,7 @@ public partial class CommandPaletteViewModel : ObservableObject
         if (mode == InputMode.Command || mode == InputMode.PathNavigate)
         {
             // Immediate for commands and path navigation
-            _ = UpdateResultsAsync(value);
+            UpdateResultsAsync(value).SafeFireAndForget("CommandPalette.Search", "検索に失敗しました");
         }
         else
         {
@@ -147,7 +136,8 @@ public partial class CommandPaletteViewModel : ObservableObject
                     await NavigateAction(item.Data);
                 break;
             case CommandKind.AppCommand:
-                await ExecuteAppCommand(item.Data);
+                if (item.Command != null)
+                    await item.Command.Execute();
                 break;
             case CommandKind.FileItem:
                 // For files, open with default app; for directories, navigate
@@ -182,28 +172,6 @@ public partial class CommandPaletteViewModel : ObservableObject
                     }
                     catch (Exception ex) { Snap.Services.Log.UserError("CommandPalette.Open", $"ファイルを開けません（{item.Data}）", ex); }
                 }
-                break;
-        }
-    }
-
-    private async Task ExecuteAppCommand(string command)
-    {
-        switch (command)
-        {
-            case "new tab":
-                if (AddTabAction != null) await AddTabAction();
-                break;
-            case "close tab":
-                CloseTabAction?.Invoke();
-                break;
-            case "refresh":
-                if (RefreshAction != null) await RefreshAction();
-                break;
-            case "settings":
-                OpenSettingsAction?.Invoke();
-                break;
-            case "terminal":
-                OpenTerminalAction?.Invoke();
                 break;
         }
     }
@@ -352,26 +320,18 @@ public partial class CommandPaletteViewModel : ObservableObject
 
     private void AddCommandResults(string filter)
     {
-        var commands = new (string name, string label, string icon)[]
+        foreach (var command in Commands)
         {
-            ("new tab",   "New Tab",           "\uE710"),
-            ("close tab", "Close Tab",         "\uE711"),
-            ("refresh",   "Refresh",           "\uE72C"),
-            ("settings",  "Open settings.json", "\uE713"),
-            ("terminal",  "Open Terminal Here", "\uE756"),
-        };
-
-        foreach (var (name, label, icon) in commands)
-        {
-            if (string.IsNullOrEmpty(filter) || name.Contains(filter, StringComparison.OrdinalIgnoreCase))
+            if (string.IsNullOrEmpty(filter) || command.Name.Contains(filter, StringComparison.OrdinalIgnoreCase))
             {
                 Results.Add(new CommandPaletteItem
                 {
-                    DisplayText = label,
-                    Icon = icon,
+                    DisplayText = command.Label,
+                    Icon = command.Icon,
                     Kind = CommandKind.AppCommand,
-                    Data = name,
-                    DisplaySegments = new() { new(label, false) },
+                    Data = command.Name,
+                    Command = command,
+                    DisplaySegments = new() { new(command.Label, false) },
                 });
             }
             if (Results.Count >= 20) break;
@@ -684,6 +644,8 @@ public class CommandPaletteItem
     public string Icon { get; set; } = string.Empty;
     public CommandKind Kind { get; set; }
     public string Data { get; set; } = string.Empty;
+    /// <summary>The app command to run (Kind == AppCommand).</summary>
+    public PaletteCommand? Command { get; set; }
     public List<HighlightSegment> DisplaySegments { get; set; } = new();
     public List<HighlightSegment> SecondarySegments { get; set; } = new();
 }

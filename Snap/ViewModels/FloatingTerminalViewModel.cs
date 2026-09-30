@@ -3,6 +3,7 @@ using System.IO;
 using System.Runtime.InteropServices;
 using CommunityToolkit.Mvvm.ComponentModel;
 using System.Text;
+using Snap.Helpers;
 
 namespace Snap.ViewModels;
 
@@ -89,7 +90,7 @@ public partial class FloatingTerminalViewModel : ObservableObject, IDisposable
     public void Open()
     {
         IsVisible = true;
-        StartShell();
+        StartShellAsync().SafeFireAndForget("Terminal.StartShell", "ターミナルを起動できません");
     }
 
     public void Close()
@@ -165,7 +166,7 @@ public partial class FloatingTerminalViewModel : ObservableObject, IDisposable
         return found;
     }
 
-    private async void StartShell()
+    private async Task StartShellAsync()
     {
         StopShell();
 

@@ -1,6 +1,7 @@
 using System.Collections.ObjectModel;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
+using Snap.Helpers;
 using Snap.Models;
 using Snap.Services;
 
@@ -12,6 +13,14 @@ public partial class TabPaneViewModel : ObservableObject
     private FilePaneViewModel? _selectedTab;
 
     public ObservableCollection<FilePaneViewModel> Tabs { get; } = new();
+
+    /// <summary>A tab coming to the front reloads when its folder changed while it was in the
+    /// background without a folder watcher (<see cref="FilePaneViewModel.IsStale"/>, #23).</summary>
+    partial void OnSelectedTabChanged(FilePaneViewModel? value)
+    {
+        if (value is { IsStale: true })
+            value.Refresh().SafeFireAndForget("TabPane.StaleRefresh", "更新できません");
+    }
 
     /// <summary>タブが閉じられた時にパスを通知</summary>
     public event Action<string>? TabClosed;

@@ -7,7 +7,9 @@ using System.Windows.Interop;
 namespace Snap.Interop;
 
 
-internal record SnapMenuItem(string Label, Action Handler);
+/// <param name="AtTop">Put the item at the top of the menu (above the shell's items) instead of
+/// at the bottom, e.g. "貼り付け" in the background menu (#23).</param>
+internal record SnapMenuItem(string Label, Action Handler, bool AtTop = false);
 
 internal static class ShellContextMenu
 {
@@ -386,10 +388,28 @@ internal static class ShellContextMenu
         var cmdMap = new Dictionary<uint, Action>();
         if (customItems == null || customItems.Count == 0) return cmdMap;
 
+        uint cmdId = ShellNativeMethods.SNAP_CMD_BASE;
+
+        // Items for the top, then a separator above the shell's items.
+        var top = customItems.Where(i => i.AtTop).ToList();
+        uint pos = 0;
+        foreach (var item in top)
+        {
+            ShellNativeMethods.InsertMenu(hMenu, pos++,
+                ShellNativeMethods.MF_BYPOSITION | ShellNativeMethods.MF_STRING, (UIntPtr)cmdId, item.Label);
+            cmdMap[cmdId] = item.Handler;
+            cmdId++;
+        }
+        if (top.Count > 0)
+            ShellNativeMethods.InsertMenu(hMenu, pos,
+                ShellNativeMethods.MF_BYPOSITION | ShellNativeMethods.MF_SEPARATOR, UIntPtr.Zero, null);
+
+        var bottom = customItems.Where(i => !i.AtTop).ToList();
+        if (bottom.Count == 0) return cmdMap;
+
         ShellNativeMethods.AppendMenu(hMenu, ShellNativeMethods.MF_SEPARATOR, UIntPtr.Zero, null);
 
-        uint cmdId = ShellNativeMethods.SNAP_CMD_BASE;
-        foreach (var item in customItems)
+        foreach (var item in bottom)
         {
             ShellNativeMethods.AppendMenu(hMenu, ShellNativeMethods.MF_STRING,
                 (UIntPtr)cmdId, item.Label);

@@ -294,7 +294,9 @@ public partial class MainViewModel : ObservableObject
     }
 
     /// <summary>Refreshes every pane whose selected tab shows one of <paramref name="folders"/>
-    /// (except <paramref name="except"/>), e.g. the source folders after a move.</summary>
+    /// (except <paramref name="except"/>), e.g. the source folders after a move. A background tab
+    /// showing one of them is marked stale and reloaded when it comes to the front, unless its
+    /// folder watcher already follows the folder (#23).</summary>
     public async Task RefreshPanesShowing(IEnumerable<string> folders, FilePaneViewModel? except = null)
     {
         var list = folders.Where(f => !string.IsNullOrEmpty(f)).ToList();
@@ -302,10 +304,17 @@ public partial class MainViewModel : ObservableObject
 
         foreach (var pane in AllPanes)
         {
-            var tab = pane.SelectedTab;
-            if (tab == null || tab == except) continue;
-            if (list.Any(f => FileSystemService.SamePath(f, tab.CurrentPath)))
-                await tab.Refresh();
+            foreach (var tab in pane.Tabs.ToList())
+            {
+                if (tab == except || !list.Any(f => FileSystemService.SamePath(f, tab.CurrentPath))) continue;
+                if (tab == pane.SelectedTab)
+                    await tab.Refresh();
+                else if (!tab.IsWatchingCurrentFolder)
+                {
+                    tab.IsStale = true;
+                    Log.Info("Main.Refresh", $"background tab marked stale: {tab.CurrentPath}");
+                }
+            }
         }
     }
 

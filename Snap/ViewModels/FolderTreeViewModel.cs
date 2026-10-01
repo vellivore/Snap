@@ -82,19 +82,11 @@ public partial class FolderTreeViewModel : ObservableObject
             if (labels.TryGetValue(node, out var label) && node.Name != label)
                 node.Name = label;
 
-        // One Remove / Insert per drive, never a Reset: a Reset re-creates every drive's tree item,
-        // and the re-created item of the selected folder raises Selected again, which navigates
-        // the active pane (TreeViewItem_Selected → OnNodeSelected).
-        var children = pcNode.Children;
-        for (int i = children.Count - 1; i >= 0; i--)
-            if (!nodes.Contains(children[i])) children.RemoveAt(i);
-        for (int i = 0; i < nodes.Count; i++)
-        {
-            if (i < children.Count && ReferenceEquals(children[i], nodes[i])) continue;
-            var at = children.IndexOf(nodes[i]);
-            if (at >= 0) children.Move(at, i);
-            else children.Insert(i, nodes[i]);
-        }
+        // Nodes of drives still present are the same objects (expanded state, loaded children).
+        // A re-created tree item no longer moves the pane (only user input does, #23), so the
+        // list is swapped in one step when it changed.
+        if (!pcNode.Children.SequenceEqual(nodes))
+            pcNode.Children.ReplaceAll(nodes);
         Log.Info("FolderTree.Drives", $"drives now: {string.Join(" ", nodes.Select(n => n.FullPath))}");
     }
 
@@ -217,28 +209,10 @@ public partial class FolderTreeViewModel : ObservableObject
     /// <summary>
     /// Hidden files were switched on / off (Ctrl+H, #17): every folder whose children are loaded
     /// gets them again. Nodes still listed are kept (expanded state, selection); hidden ones are
-    /// added or removed one by one, never a Reset (a re-created selected item would raise
-    /// Selected and move the active pane, see <see cref="RefreshDrivesAsync"/>).
+    /// added or removed. Re-prepared item containers no longer move the pane: only a selection
+    /// made by the user's mouse / keys navigates (#23, FolderTreeControl).
     /// </summary>
     public async Task ApplyShowHiddenAsync()
-    {
-        // Adding / removing nodes re-prepares the item containers around them, and a re-prepared
-        // container of the selected node raises Selected again (from its IsSelected binding), which
-        // would move the active pane to that folder. Selections are ignored until the tree has been
-        // laid out after the change.
-        _ignoreSelectionDepth++;
-        try { await ApplyShowHiddenCoreAsync(); }
-        finally
-        {
-            System.Windows.Application.Current?.Dispatcher.BeginInvoke(
-                System.Windows.Threading.DispatcherPriority.ContextIdle, () => _ignoreSelectionDepth--);
-        }
-    }
-
-    // > 0 while ApplyShowHiddenAsync changes the nodes (until the layout after it).
-    private int _ignoreSelectionDepth;
-
-    private async Task ApplyShowHiddenCoreAsync()
     {
         var showHidden = ViewOptions.ShowHidden;
         var loaded = new List<TreeNode>();
@@ -290,15 +264,12 @@ public partial class FolderTreeViewModel : ObservableObject
     }
 
     /// <summary>
-    /// ツリーからユーザーがクリックして選択した場合
+    /// The user selected <paramref name="node"/> in the tree with the mouse or the keyboard
+    /// (FolderTreeControl calls it only for user input, never for programmatic selection, #23):
+    /// the active pane moves there.
     /// </summary>
     public void OnNodeSelected(TreeNode node)
     {
-        if (_ignoreSelectionDepth > 0)
-        {
-            Log.Info("FolderTree.Select", $"ignored while hidden files are re-applied: {node.FullPath}");
-            return;
-        }
         if (node.FullPath != "__dummy__")
         {
             // The pane navigation triggered by FolderSelected completes asynchronously,

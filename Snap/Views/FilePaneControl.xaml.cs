@@ -24,6 +24,9 @@ public partial class FilePaneControl : UserControl
     // File drag & drop state
     private Point _fileDragStartPoint;
     private bool _fileDragInProgress;
+    // The left button went down on a column header (resize grip, header click) or a scroll bar:
+    // that press never starts a file drag (#23).
+    private bool _fileDragBlocked;
     private const double FileDragThreshold = 8.0;
     private readonly DragGhostHelper _dragGhost = new();
     /// <summary>
@@ -1012,6 +1015,12 @@ public partial class FilePaneControl : UserControl
                 }),
                 new("更新", () => Dispatcher.BeginInvoke(() => vm?.Refresh().SafeFireAndForget("FilePane.Refresh", "更新できません"))),
             };
+
+            // Explorer's "Paste" comes from its view (DefView), not from the folder's menu, so
+            // Snap adds its own at the top while files are on the clipboard (#23).
+            if (ClipboardHasFiles() && FilePaneViewModel.CanCreateHere(bgPath))
+                customItems.Insert(0, new("貼り付け", () => Dispatcher.BeginInvoke(() =>
+                    vm.PasteItems().SafeFireAndForget("FilePane.Paste", "貼り付けできません")), AtTop: true));
         }
 
         _menuBusy = true;
@@ -1065,6 +1074,18 @@ public partial class FilePaneControl : UserControl
         }
     }
 
+    /// <summary>Files (copied or cut) are on the clipboard. A clipboard held open by another
+    /// process counts as none.</summary>
+    private static bool ClipboardHasFiles()
+    {
+        try { return Clipboard.ContainsFileDropList(); }
+        catch (Exception ex)
+        {
+            Log.Warn("FilePane.ContextMenu", "clipboard check failed", ex);
+            return false;
+        }
+    }
+
     private static T? FindAncestor<T>(DependencyObject? current) where T : DependencyObject
     {
         while (current != null)
@@ -1109,12 +1130,18 @@ public partial class FilePaneControl : UserControl
         if (_shellMenuOpen) return;
         _fileDragStartPoint = e.GetPosition(FileListView);
         _fileDragInProgress = false;
+        var source = e.OriginalSource as DependencyObject;
+        _fileDragBlocked = source is not Visual and not System.Windows.Media.Media3D.Visual3D
+            ? false
+            : FindAncestor<GridViewColumnHeader>(source) != null
+              || FindAncestor<System.Windows.Controls.Primitives.Thumb>(source) != null
+              || FindAncestor<System.Windows.Controls.Primitives.ScrollBar>(source) != null;
     }
 
     private void FileList_PreviewMouseMove(object sender, MouseEventArgs e)
     {
         if (_shellMenuOpen) return;
-        if (e.LeftButton != MouseButtonState.Pressed || _fileDragInProgress)
+        if (e.LeftButton != MouseButtonState.Pressed || _fileDragInProgress || _fileDragBlocked)
             return;
 
         var pos = e.GetPosition(FileListView);

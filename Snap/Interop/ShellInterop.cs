@@ -154,6 +154,11 @@ internal static class ShellNativeMethods
     internal static extern bool AppendMenu(
         IntPtr hMenu, uint uFlags, UIntPtr uIDNewItem, string? lpNewItem);
 
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static extern bool InsertMenu(
+        IntPtr hMenu, uint uPosition, uint uFlags, UIntPtr uIDNewItem, string? lpNewItem);
+
     [DllImport("ole32.dll")]
     internal static extern void CoTaskMemFree(IntPtr pv);
 

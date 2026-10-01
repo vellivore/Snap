@@ -12,6 +12,69 @@ public partial class FolderTreeControl : UserControl
     public FolderTreeControl()
     {
         InitializeComponent();
+
+        // A selection navigates the active pane only when it comes from the user's mouse or keys
+        // (#23): the flag is set in the Preview phase of the input and cleared once the input event
+        // has been through the tree (handled or not). Selections made by SyncToPathAsync, by a
+        // re-created / recycled item container or by a layout pass happen outside that window and
+        // only scroll the item into view.
+        FolderTree.AddHandler(PreviewMouseLeftButtonDownEvent, new MouseButtonEventHandler(OnPreviewMouseDown), true);
+        FolderTree.AddHandler(MouseLeftButtonDownEvent, new MouseButtonEventHandler((_, _) => EndUserInput()), true);
+        FolderTree.AddHandler(PreviewKeyDownEvent, new KeyEventHandler(OnPreviewKeyDown), true);
+        FolderTree.AddHandler(KeyDownEvent, new KeyEventHandler(OnKeyDownDone), true);
+    }
+
+    // True while a mouse click or a selection key is being handled by the tree.
+    private bool _userInput;
+
+    private void OnPreviewMouseDown(object sender, MouseButtonEventArgs e)
+    {
+        // A click on the expander arrow only expands / collapses (it does not select either).
+        if (FindAncestor<System.Windows.Controls.Primitives.ToggleButton>(e.OriginalSource as DependencyObject) != null)
+            return;
+        _userInput = true;
+    }
+
+    private void OnPreviewKeyDown(object sender, KeyEventArgs e)
+    {
+        if ((Keyboard.Modifiers & (ModifierKeys.Control | ModifierKeys.Alt)) != 0) return;
+        var key = e.Key == Key.System ? e.SystemKey : e.Key;
+        switch (key)
+        {
+            case Key.Up: case Key.Down: case Key.Left: case Key.Right:
+            case Key.Home: case Key.End: case Key.PageUp: case Key.PageDown:
+                _userInput = true;
+                break;
+            case Key.Enter: case Key.Space:
+                // Enter / Space: open the selected folder even when the selection does not change.
+                if (FolderTree.SelectedItem is TreeNode node && ViewModel != null)
+                {
+                    ViewModel.OnNodeSelected(node);
+                    e.Handled = true;
+                }
+                break;
+            default:
+                // Typing a name selects the matching item (text search).
+                if (key is >= Key.A and <= Key.Z or >= Key.D0 and <= Key.D9 or >= Key.NumPad0 and <= Key.NumPad9)
+                    _userInput = true;
+                break;
+        }
+    }
+
+    private void OnKeyDownDone(object sender, KeyEventArgs e) => EndUserInput();
+
+    private void EndUserInput() => _userInput = false;
+
+    private static T? FindAncestor<T>(DependencyObject? d) where T : DependencyObject
+    {
+        while (d != null && d is not TreeViewItem)
+        {
+            if (d is T t) return t;
+            d = d is System.Windows.Media.Visual or System.Windows.Media.Media3D.Visual3D
+                ? System.Windows.Media.VisualTreeHelper.GetParent(d)
+                : LogicalTreeHelper.GetParent(d);
+        }
+        return null;
     }
 
     private FolderTreeViewModel? ViewModel => DataContext as FolderTreeViewModel;
@@ -38,8 +101,8 @@ public partial class FolderTreeControl : UserControl
             // Auto-scroll to selected node
             tvi.BringIntoView();
 
-            // プログラムからの同期中（SyncToPathAsync）はペインへのナビゲーションを発火しない
-            if (!ViewModel.IsSyncing)
+            // Only a selection made by the user's click / keys moves the pane (#23).
+            if (_userInput)
                 ViewModel.OnNodeSelected(node);
             e.Handled = true;
         }

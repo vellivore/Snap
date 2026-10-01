@@ -32,6 +32,9 @@ public sealed class FolderWatcher : IDisposable
     private bool _restart;
     private DateTime _firstPendingUtc;
     private bool _disposed;
+    // > 0 while the tab is (re)loading the folder (#23): events are collected but not delivered
+    // until the new listing is in place, so changes made during the enumeration are not lost.
+    private int _holdCount;
 
     public FolderWatcher(Action<string, IReadOnlyCollection<string>, bool> onChanges)
     {
@@ -84,6 +87,32 @@ public sealed class FolderWatcher : IDisposable
             catch (Exception ex)
             {
                 Log.Warn("FolderWatcher.Watch", $"not watched: {path}", ex);
+            }
+        }
+    }
+
+    /// <summary>
+    /// Keeps collecting events but delivers none until the matching <see cref="Release"/> (#23).
+    /// Called before a listing is read; every Hold must be followed by exactly one Release.
+    /// Not tied to the watched folder: a <see cref="Watch"/> in between keeps the hold.
+    /// </summary>
+    public void Hold()
+    {
+        lock (_gate) _holdCount++;
+    }
+
+    /// <summary>Ends one <see cref="Hold"/>; the last one delivers what was collected meanwhile
+    /// (after the usual quiet time).</summary>
+    public void Release()
+    {
+        lock (_gate)
+        {
+            if (_holdCount == 0) return;
+            if (--_holdCount > 0 || _disposed) return;
+            if (_fsw != null && (_pending.Count > 0 || _reloadAll))
+            {
+                _firstPendingUtc = default;
+                ScheduleLocked();
             }
         }
     }
@@ -176,6 +205,7 @@ public sealed class FolderWatcher : IDisposable
             _firstPendingUtc = default;
             if (_disposed || _fsw == null || _path == null) return;
             if (_pending.Count == 0 && !_reloadAll) return;
+            if (_holdCount > 0) return; // delivered by Release
             folder = _path;
             names = _pending;
             reloadAll = _reloadAll;

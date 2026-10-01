@@ -291,8 +291,11 @@ public partial class FilePaneViewModel : ObservableObject, IDisposable
 
     public FilePaneViewModel(string initialPath)
     {
-        // Validate the path; fall back to C:\ if it doesn't exist
-        if (string.IsNullOrWhiteSpace(initialPath) || !Directory.Exists(initialPath))
+        // The PC view is a valid start (a saved PC tab, a copy of a PC tab, #23); any other path
+        // must exist, else C:\.
+        if (string.Equals(initialPath?.Trim(), PcViewPath, StringComparison.OrdinalIgnoreCase))
+            initialPath = PcViewPath;
+        else if (string.IsNullOrWhiteSpace(initialPath) || !Directory.Exists(initialPath))
             initialPath = @"C:\";
         CurrentPath = initialPath;
         AddressText = initialPath;
@@ -366,6 +369,10 @@ public partial class FilePaneViewModel : ObservableObject, IDisposable
         EndHeldMessage();
         SetCountStatus("読み込み中...");
 
+        // The folder is watched before it is read (#23): changes made while it is enumerated are
+        // collected and applied once the new listing is in place (Release in finally).
+        _watcher.Watch(path);
+        _watcher.Hold();
         try
         {
             var tracker = _usageTracker;
@@ -412,7 +419,6 @@ public partial class FilePaneViewModel : ObservableObject, IDisposable
                 UpdateItemCountStatus(load.Skipped);
                 // Text is on screen now; real folder / drive icons follow from the icon worker (#16).
                 StartIconFill(items, path, timing);
-                _watcher.Watch(path);
             });
             LogShownTiming(path, items.Count, timing);
 
@@ -468,14 +474,21 @@ public partial class FilePaneViewModel : ObservableObject, IDisposable
         }
         finally
         {
-            // Only the latest navigation clears the loading state.
+            // Only the latest navigation clears the loading state. When it failed, the tab still
+            // shows its previous folder: that one is watched again.
             if (IsCurrent())
+            {
                 IsLoading = false;
+                _watcher.Watch(CurrentPath);
+            }
+            _watcher.Release();
         }
     }
 
     /// <summary>Measurement (#16): logs how long the list took until its text was on screen
-    /// (the Loaded-priority callback runs after layout and render of the new rows).</summary>
+    /// (the Loaded-priority callback runs after layout and render of the new rows).
+    /// Debug builds only (#23): a Release build does not log every navigation.</summary>
+    [Conditional("DEBUG")]
     private static void LogShownTiming(string path, int count, Stopwatch timing)
     {
         var applied = timing.ElapsedMilliseconds;
@@ -532,8 +545,21 @@ public partial class FilePaneViewModel : ObservableObject, IDisposable
     [RelayCommand]
     public async Task Refresh()
     {
+        IsStale = false;
         await NavigateCoreAsync(CurrentPath, addToHistory: false, historyIndex: null);
     }
+
+    /// <summary>
+    /// A background tab whose folder was changed by a file operation while no folder watcher
+    /// covered it (network location, watcher could not start): reloaded when it comes to the
+    /// front (TabPaneViewModel.OnSelectedTabChanged, #23).
+    /// </summary>
+    public bool IsStale { get; set; }
+
+    /// <summary>True when this tab's folder watcher is running on <see cref="CurrentPath"/>,
+    /// i.e. changes to the folder reach the list without a refresh (#16).</summary>
+    public bool IsWatchingCurrentFolder =>
+        _watcher.WatchedPath is { } watched && FileSystemService.SamePath(watched, CurrentPath);
 
     [RelayCommand]
     public async Task OpenItem(FileItem? item)
@@ -970,7 +996,7 @@ public partial class FilePaneViewModel : ObservableObject, IDisposable
     }
 
     /// <summary>A real folder that can hold new items (not the PC view, not \\server).</summary>
-    private static bool CanCreateHere(string dir) =>
+    public static bool CanCreateHere(string dir) =>
         !string.IsNullOrEmpty(dir)
         && !string.Equals(dir, PcViewPath, StringComparison.OrdinalIgnoreCase)
         && !FileSystemService.IsUncServerPath(dir);
@@ -1007,11 +1033,21 @@ public partial class FilePaneViewModel : ObservableObject, IDisposable
             await OpenItem(file);
     }
 
-    private List<FileItem> SelectedInListOrder(System.Collections.IList? selectedItems) =>
-        (selectedItems?.OfType<FileItem>() ?? Enumerable.Empty<FileItem>())
+    /// <summary>The selected entries in list order. One pass over <see cref="Items"/> builds the
+    /// positions (#23: an IndexOf per selected entry was O(n²) for a large selection).</summary>
+    private List<FileItem> SelectedInListOrder(System.Collections.IList? selectedItems)
+    {
+        var selected = (selectedItems?.OfType<FileItem>() ?? Enumerable.Empty<FileItem>())
             .Where(f => f.Name != "..")
-            .OrderBy(f => Items.IndexOf(f))
             .ToList();
+        if (selected.Count <= 1) return selected;
+
+        var position = new Dictionary<FileItem, int>(Items.Count, ReferenceEqualityComparer.Instance);
+        for (int i = 0; i < Items.Count; i++) position.TryAdd(Items[i], i);
+        return selected
+            .OrderBy(f => position.TryGetValue(f, out var at) ? at : -1)
+            .ToList();
+    }
 
     /// <summary>Alt+Enter: the shell's Properties dialog for the item (this folder when null).</summary>
     public void ShowProperties(FileItem? item)
@@ -1430,6 +1466,8 @@ public partial class FilePaneViewModel : ObservableObject, IDisposable
         var path = CurrentPath;
         var gen = Volatile.Read(ref _navGeneration);
         var tracker = _usageTracker;
+        // Changes during the re-read wait until the new listing is in place (#23).
+        _watcher.Hold();
         try
         {
             var load = await Task.Run(() => path == PcViewPath ? LoadDrives() : LoadDirectory(path));
@@ -1453,6 +1491,10 @@ public partial class FilePaneViewModel : ObservableObject, IDisposable
         {
             Log.Warn("FilePane.Reload", path, ex);
         }
+        finally
+        {
+            _watcher.Release();
+        }
     }
 
     // ==================== Icons after the text (#16) ====================
@@ -1475,8 +1517,12 @@ public partial class FilePaneViewModel : ObservableObject, IDisposable
         var folders = items.Where(i => i.IsDirectory).ToList();
         if (folders.Count == 0) return;
 
-        Action? completed = timing == null ? null : () =>
-            Log.Info("FilePane.Timing", $"{path}: icons of {folders.Count} folders filled {timing.ElapsedMilliseconds} ms after navigate");
+        Action? completed = null;
+#if DEBUG
+        // Measurement (#16), Debug builds only (#23).
+        if (timing != null)
+            completed = () => Log.Info("FilePane.Timing", $"{path}: icons of {folders.Count} folders filled {timing.ElapsedMilliseconds} ms after navigate");
+#endif
         IconHelper.QueuePathIcons(folders, i => i.FullPath, SetIcon, _iconCts.Token, completed);
     }
 

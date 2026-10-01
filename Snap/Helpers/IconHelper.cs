@@ -6,6 +6,8 @@ using System.Windows;
 using System.Windows.Interop;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
+using System.Windows.Threading;
+using Snap.Interop;
 
 namespace Snap.Helpers;
 
@@ -93,7 +95,7 @@ public static class IconHelper
     private static Color CategoryColorFor(string ext) =>
         _extColor.TryGetValue(ext, out var c) ? c : DefaultColor;
 
-    /// <summary>カテゴリ色＋拡張子ラベルの 32px バッジ ImageSource を生成する（UIスレッドで実行）。</summary>
+    /// <summary>カテゴリ色＋拡張子ラベルの 32px バッジ ImageSource を生成する（STA の Dispatcher スレッドで実行・Freeze 済み）。</summary>
     private static ImageSource CreateBadgeIcon(string label, Color color)
     {
         const int px = 32;
@@ -120,15 +122,26 @@ public static class IconHelper
         return rtb;
     }
 
-    private static T RunOnUi<T>(Func<T> f)
+    // ==================== Threads (#16) ====================
+    // SHGetFileInfo must run on an STA thread (on the thread pool it can return hIcon = 0), and the
+    // badge bitmaps need a Dispatcher thread. Nothing here waits on the UI thread any more:
+    // STA dispatcher threads (the UI, the icon worker) call the shell directly; thread-pool
+    // threads (the list loader) hand the call to IconWorker and wait for it.
+
+    private static readonly TimeSpan WorkerTimeout = TimeSpan.FromSeconds(5);
+
+    private static bool OnStaDispatcherThread() =>
+        Thread.CurrentThread.GetApartmentState() == ApartmentState.STA
+        && Dispatcher.FromThread(Thread.CurrentThread) != null;
+
+    /// <summary>Runs <paramref name="f"/> here when this is an STA dispatcher thread, else on the icon worker.</summary>
+    private static T OnSta<T>(Func<T> f, T fallback)
     {
-        var disp = Application.Current?.Dispatcher;
-        if (disp == null || disp.CheckAccess())
-            return f();
-        return disp.Invoke(f);
+        if (OnStaDispatcherThread()) return f();
+        return IconWorker.Instance.TryInvoke(f, WorkerTimeout, out var r) && r is not null ? r : fallback;
     }
 
-    /// <summary>シェルアイコンが汎用（白紙）に潰れる拡張子なら自作バッジに差し替える。</summary>
+    /// <summary>シェルアイコンが汎用（白紙）に潰れる拡張子なら自作バッジに差し替える（STA スレッドで呼ぶ）。</summary>
     private static (ImageSource? icon, string typeName) ApplyBadgeIfGeneric(
         string ext, (ImageSource? icon, string typeName) shell, int iIcon)
     {
@@ -137,69 +150,135 @@ public static class IconHelper
             var label = ext.TrimStart('.').ToUpperInvariant();
             if (label.Length > 4) label = label[..4];
             var color = CategoryColorFor(ext);
-            var badge = RunOnUi(() => CreateBadgeIcon(label, color));
-            return (badge, shell.typeName);
+            return (CreateBadgeIcon(label, color), shell.typeName);
         }
         return shell;
     }
 
+    /// <summary>Icon and type name of a file by its extension (cached; no disk access).
+    /// Any thread; a first-time extension is looked up on an STA thread.</summary>
+    public static (ImageSource? icon, string typeName) GetFileTypeIcon(string path)
+    {
+        var ext = Path.GetExtension(path).ToLowerInvariant();
+        if (string.IsNullOrEmpty(ext)) ext = ".";
+        if (_fileIconCache.TryGetValue(ext, out var hit)) return hit;
+
+        var entry = OnSta<(ImageSource? icon, string typeName)>(() =>
+        {
+            var shell = GetIconFromShell("dummy" + ext, FILE_ATTRIBUTE_NORMAL, true, out int iIcon);
+            return ApplyBadgeIfGeneric(ext, shell, iIcon);
+        }, ((ImageSource?)null, "ファイル"));
+        // A failed lookup (worker timeout) is not cached, so the next listing tries again.
+        return entry.icon != null ? _fileIconCache.GetOrAdd(ext, entry) : entry;
+    }
+
+    /// <summary>The generic folder icon and type name (cached; no disk access). Any thread.
+    /// Shown first for every folder; <see cref="QueuePathIcons"/> puts the real icon in later.</summary>
+    public static (ImageSource? icon, string typeName) GetDefaultFolderIcon()
+    {
+        if (_fileIconCache.TryGetValue("\\dir", out var hit)) return hit;
+        var entry = OnSta<(ImageSource? icon, string typeName)>(() => GetIconFromShell("folder", FILE_ATTRIBUTE_DIRECTORY, useFileAttributes: true),
+            ((ImageSource?)null, "フォルダー"));
+        return entry.icon != null ? _fileIconCache.GetOrAdd("\\dir", entry) : entry;
+    }
+
+    /// <summary>
+    /// Icon and type name of one path, synchronously. For the few single icons (breadcrumb, tab
+    /// headers, sidebar, bookmarks): on the UI thread the shell is called directly, as before.
+    /// Lists and the tree use <see cref="GetFileTypeIcon"/> / <see cref="GetDefaultFolderIcon"/>
+    /// plus <see cref="QueuePathIcons"/> instead.
+    /// </summary>
     public static (ImageSource? icon, string typeName) GetIconAndType(string path, bool isDirectory)
     {
         // Network paths: use generic icons (fast, no network access)
         if (path.StartsWith(@"\\"))
-        {
-            if (isDirectory)
-            {
-                return _fileIconCache.GetOrAdd("\\dir", _ =>
-                    GetIconFromShell("folder", FILE_ATTRIBUTE_DIRECTORY, useFileAttributes: true));
-            }
-            var netExt = Path.GetExtension(path).ToLowerInvariant();
-            if (string.IsNullOrEmpty(netExt)) netExt = ".";
-            return _fileIconCache.GetOrAdd(netExt, _ =>
-            {
-                var shell = GetIconFromShell("dummy" + netExt, FILE_ATTRIBUTE_NORMAL, true, out int iIcon);
-                return ApplyBadgeIfGeneric(netExt, shell, iIcon);
-            });
-        }
+            return isDirectory ? GetDefaultFolderIcon() : GetFileTypeIcon(path);
 
         if (isDirectory)
-        {
-            return GetFolderIcon(path);
-        }
+            return OnSta(() => GetFolderIcon(path), GetDefaultFolderIcon());
 
         // ファイル: 拡張子でキャッシュ
-        var ext = Path.GetExtension(path).ToLowerInvariant();
-        if (string.IsNullOrEmpty(ext))
-            ext = ".";
-
-        return _fileIconCache.GetOrAdd(ext, _ =>
-        {
-            var dummyPath = "dummy" + ext;
-            var shell = GetIconFromShell(dummyPath, FILE_ATTRIBUTE_NORMAL, true, out int iIcon);
-            return ApplyBadgeIfGeneric(ext, shell, iIcon);
-        });
+        return GetFileTypeIcon(path);
     }
 
-    private static (ImageSource? icon, string typeName) GetFolderIcon(string path)
-    {
-        // SHGetFileInfo をUIスレッドで呼ぶ（バックグラウンドスレッドだと hIcon=0 になる場合がある）
-        SHFILEINFO shfi = default;
-        IntPtr result = IntPtr.Zero;
-        uint flags = SHGFI_ICON | SHGFI_SMALLICON | SHGFI_TYPENAME;
+    // ==================== Icons filled in afterwards (#16) ====================
 
-        if (Application.Current?.Dispatcher.CheckAccess() == true)
+    private const int IconBatchSize = 64;
+
+    /// <summary>
+    /// Looks up the real icon of each target's path (a folder's own icon, a drive's icon) on the
+    /// icon worker in batches and hands it to <paramref name="apply"/> on the UI thread. Returns at
+    /// once. UNC paths are skipped (they keep the generic icon, no network access). Batches still
+    /// queued when <paramref name="ct"/> is cancelled (the list moved on) are dropped.
+    /// <paramref name="completed"/> runs on the UI thread after the last batch was applied.
+    /// </summary>
+    public static void QueuePathIcons<T>(IReadOnlyList<T> targets, Func<T, string> pathOf,
+        Action<T, ImageSource> apply, CancellationToken ct = default, Action? completed = null)
+    {
+        var ui = Application.Current?.Dispatcher;
+        if (ui == null || targets.Count == 0)
         {
-            shfi = new SHFILEINFO();
-            result = SHGetFileInfo(path, 0, ref shfi, (uint)Marshal.SizeOf(shfi), flags);
+            completed?.Invoke();
+            return;
         }
-        else
+
+        var worker = IconWorker.Instance;
+        int remaining = (targets.Count + IconBatchSize - 1) / IconBatchSize;
+
+        void BatchDone()
         {
-            Application.Current?.Dispatcher.Invoke(() =>
+            if (Interlocked.Decrement(ref remaining) == 0 && completed != null)
+                ui.BeginInvoke(DispatcherPriority.Background, completed);
+        }
+
+        for (int start = 0; start < targets.Count; start += IconBatchSize)
+        {
+            int from = start, to = Math.Min(start + IconBatchSize, targets.Count);
+            worker.Post(() =>
             {
-                shfi = new SHFILEINFO();
-                result = SHGetFileInfo(path, 0, ref shfi, (uint)Marshal.SizeOf(shfi), flags);
+                try
+                {
+                    if (ct.IsCancellationRequested) return;
+                    var results = new List<(T target, ImageSource icon)>(to - from);
+                    for (int i = from; i < to && !ct.IsCancellationRequested; i++)
+                    {
+                        var p = pathOf(targets[i]);
+                        if (string.IsNullOrEmpty(p) || p.StartsWith(@"\\")) continue;
+                        if (LookupPathIcon(p) is { } icon) results.Add((targets[i], icon));
+                    }
+                    if (results.Count > 0 && !ct.IsCancellationRequested)
+                    {
+                        ui.BeginInvoke(DispatcherPriority.Background, () =>
+                        {
+                            if (ct.IsCancellationRequested) return;
+                            foreach (var (target, icon) in results) apply(target, icon);
+                        });
+                    }
+                }
+                finally { BatchDone(); }
             });
         }
+    }
+
+    /// <summary>
+    /// The small icon of a real path (worker thread). Asks only for the system image-list index
+    /// first and reuses the bitmap already made for that index; only a new index costs an HICON.
+    /// </summary>
+    private static ImageSource? LookupPathIcon(string path)
+    {
+        var shfi = new SHFILEINFO();
+        var ok = SHGetFileInfo(path, 0, ref shfi, (uint)Marshal.SizeOf(shfi), SHGFI_SYSICONINDEX | SHGFI_SMALLICON);
+        if (ok == IntPtr.Zero) return null;
+        if (_folderIconCache.TryGetValue(shfi.iIcon, out var cached)) return cached.icon;
+        return GetFolderIcon(path).icon;
+    }
+
+    /// <summary>Icon and type name of a real folder / drive path (STA thread; cached by icon index).</summary>
+    private static (ImageSource? icon, string typeName) GetFolderIcon(string path)
+    {
+        var shfi = new SHFILEINFO();
+        uint flags = SHGFI_ICON | SHGFI_SMALLICON | SHGFI_TYPENAME;
+        var result = SHGetFileInfo(path, 0, ref shfi, (uint)Marshal.SizeOf(shfi), flags);
 
         if (result == IntPtr.Zero || shfi.hIcon == IntPtr.Zero)
         {

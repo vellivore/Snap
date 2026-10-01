@@ -35,25 +35,67 @@ public partial class FolderTreeViewModel : ObservableObject
 
         foreach (var node in roots)
         {
-            try
-            {
-                if (node.FullPath == FilePaneViewModel.PcViewPath)
-                {
-                    // PC ノード自体にはアイコンなし、子ノード（ドライブ）にアイコンを設定
-                    foreach (var child in node.Children)
-                    {
-                        child.Icon = IconHelper.GetIconAndType(child.FullPath, true).icon;
-                    }
-                    node.IsExpanded = true;
-                }
-                else
-                {
-                    node.Icon = IconHelper.GetIconAndType(node.FullPath, true).icon;
-                }
-            }
-            catch (Exception ex) { Log.Warn("FolderTree.Initialize", $"icon: {node.FullPath}", ex); }
+            if (node.FullPath == FilePaneViewModel.PcViewPath)
+                node.IsExpanded = true;
             RootNodes.Add(node);
         }
+    }
+
+    /// <summary>Icon of a root / drive node, read on the thread pool through the icon worker (#16).
+    /// The PC node itself has none.</summary>
+    private static void SetRootIcon(TreeNode node)
+    {
+        try { node.Icon = IconHelper.GetIconAndType(node.FullPath, true).icon; }
+        catch (Exception ex) { Log.Warn("FolderTree.Icon", node.FullPath, ex); }
+    }
+
+    /// <summary>
+    /// Drives were added or removed (WM_DEVICECHANGE, #16): rebuilds the PC node's drive list.
+    /// Nodes of drives still present are kept (with their expanded state); new drives get a node.
+    /// </summary>
+    public async Task RefreshDrivesAsync()
+    {
+        var pcNode = RootNodes.FirstOrDefault(n => n.FullPath == FilePaneViewModel.PcViewPath);
+        if (pcNode == null) return;
+
+        var existing = pcNode.Children.ToList();
+        var (nodes, labels) = await Task.Run(() =>
+        {
+            var list = new List<TreeNode>();
+            var names = new Dictionary<TreeNode, string>();
+            foreach (var drive in FileSystemService.GetDrives(out _))
+            {
+                var node = existing.FirstOrDefault(n => FileSystemService.SamePath(n.FullPath, drive.RootPath));
+                if (node == null)
+                {
+                    node = CreateNode(drive.Label, drive.RootPath);
+                    SetRootIcon(node);
+                }
+                names[node] = drive.Label;
+                list.Add(node);
+            }
+            return (list, names);
+        });
+
+        // A label can change (another medium under the same drive letter).
+        foreach (var node in nodes)
+            if (labels.TryGetValue(node, out var label) && node.Name != label)
+                node.Name = label;
+
+        // One Remove / Insert per drive, never a Reset: a Reset re-creates every drive's tree item,
+        // and the re-created item of the selected folder raises Selected again, which navigates
+        // the active pane (TreeViewItem_Selected → OnNodeSelected).
+        var children = pcNode.Children;
+        for (int i = children.Count - 1; i >= 0; i--)
+            if (!nodes.Contains(children[i])) children.RemoveAt(i);
+        for (int i = 0; i < nodes.Count; i++)
+        {
+            if (i < children.Count && ReferenceEquals(children[i], nodes[i])) continue;
+            var at = children.IndexOf(nodes[i]);
+            if (at >= 0) children.Move(at, i);
+            else children.Insert(i, nodes[i]);
+        }
+        Log.Info("FolderTree.Drives", $"drives now: {string.Join(" ", nodes.Select(n => n.FullPath))}");
     }
 
     private List<TreeNode> BuildRootNodes()
@@ -90,6 +132,15 @@ public partial class FolderTreeViewModel : ObservableObject
         foreach (var drive in FileSystemService.GetDrives(out _))
             pcNode.Children.Add(CreateNode(drive.Label, drive.RootPath));
         roots.Add(pcNode);
+
+        // Few nodes: their icons are read here (thread pool, via the icon worker), not on the UI thread.
+        foreach (var node in roots)
+        {
+            if (node == pcNode)
+                foreach (var drive in node.Children) SetRootIcon(drive);
+            else
+                SetRootIcon(node);
+        }
 
         return roots;
     }
@@ -149,11 +200,14 @@ public partial class FolderTreeViewModel : ObservableObject
             return list;
         });
 
+        // Text first, in one step (#16): every child shows the generic folder icon and the real
+        // icons come from the icon worker (not for network paths: no network access for icons).
+        var folderIcon = IconHelper.GetDefaultFolderIcon().icon;
         foreach (var child in children)
-        {
-            child.Icon = IconHelper.GetIconAndType(child.FullPath, true).icon;
-            node.Children.Add(child);
-        }
+            child.Icon = folderIcon;
+        node.Children.ReplaceAll(children);
+        if (!FileSystemService.IsNetworkPath(node.FullPath))
+            IconHelper.QueuePathIcons(children, c => c.FullPath, (c, icon) => c.Icon = icon);
     }
 
     /// <summary>

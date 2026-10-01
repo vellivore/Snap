@@ -104,6 +104,9 @@ public partial class TabPaneViewModel : ObservableObject
         var closedPath = tab.CurrentPath;
         var index = Tabs.IndexOf(tab);
         Tabs.Remove(tab);
+        // Closing ends the tab's folder watcher and icon work (#16). A tab moved to another pane
+        // (MainViewModel.MoveTab) is removed without this and keeps them.
+        tab.Dispose();
         TabClosed?.Invoke(closedPath);
 
         if (SelectedTab == tab || SelectedTab == null)

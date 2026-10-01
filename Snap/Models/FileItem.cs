@@ -1,17 +1,33 @@
 using System.Windows.Media;
+using CommunityToolkit.Mvvm.ComponentModel;
 
 namespace Snap.Models;
 
-public class FileItem
+/// <summary>
+/// One entry of the file list. Observable (#16) so the icon filled in later by the icon worker,
+/// the frequency bar after opening a file and a size / date updated by the folder watcher show
+/// up without reloading the list.
+/// </summary>
+public partial class FileItem : ObservableObject
 {
     public string Name { get; set; } = string.Empty;
     public string FullPath { get; set; } = string.Empty;
-    public DateTime LastModified { get; set; }
-    public long Size { get; set; }
     public string Type { get; set; } = string.Empty;
     public bool IsDirectory { get; set; }
-    public ImageSource? Icon { get; set; }
-    public int FrequencyLevel { get; set; }
+
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(DisplayDate))]
+    private DateTime _lastModified;
+
+    [ObservableProperty]
+    [NotifyPropertyChangedFor(nameof(DisplaySize))]
+    private long _size;
+
+    [ObservableProperty]
+    private ImageSource? _icon;
+
+    [ObservableProperty]
+    private int _frequencyLevel;
 
     public string DisplaySize => IsDirectory && Size == 0 ? "" : FormatSize(Size);
 

@@ -89,6 +89,10 @@ public partial class MainWindow : Window
         InitializeComponent();
         DataContext = _viewModel;
 
+        // Start the icon worker here, on the UI thread (it hooks app shutdown), before the first
+        // list load asks for it from the thread pool (#16).
+        _ = Snap.Interop.IconWorker.Instance;
+
         var version = System.Reflection.Assembly.GetExecutingAssembly().GetName().Version;
         var versionStr = version != null ? $"v{version.Major}.{version.Minor}.{version.Build}" : "";
         TitleText.Text = $"Snap {versionStr}";
@@ -157,8 +161,40 @@ public partial class MainWindow : Window
         HwndSource.FromHwnd(hwnd)?.AddHook(WndProc);
     }
 
+    private const int WM_DEVICECHANGE = 0x0219;
+    private const int DBT_DEVICEARRIVAL = 0x8000;
+    private const int DBT_DEVICEREMOVECOMPLETE = 0x8004;
+    private const int DBT_DEVTYP_VOLUME = 0x0002;
+
+    /// <summary>
+    /// WM_DEVICECHANGE (#16): a volume arrived or was removed (USB stick, card, mapped / subst
+    /// drive that broadcasts). Only DBT_DEVTYP_VOLUME is handled; MainViewModel rebuilds the
+    /// tree's drives and the PC views and moves tabs off a removed drive.
+    /// </summary>
+    private void OnDeviceChange(IntPtr wParam, IntPtr lParam)
+    {
+        try
+        {
+            var evt = wParam.ToInt64();
+            if ((evt != DBT_DEVICEARRIVAL && evt != DBT_DEVICEREMOVECOMPLETE) || lParam == IntPtr.Zero) return;
+            // DEV_BROADCAST_HDR { dbch_size, dbch_devicetype, dbch_reserved } + DEV_BROADCAST_VOLUME { dbcv_unitmask, dbcv_flags }
+            if (Marshal.ReadInt32(lParam, 4) != DBT_DEVTYP_VOLUME) return;
+            var mask = Marshal.ReadInt32(lParam, 12);
+            var letters = Enumerable.Range(0, 26).Where(i => (mask & (1 << i)) != 0).Select(i => (char)('A' + i)).ToList();
+            var removed = evt == DBT_DEVICEREMOVECOMPLETE;
+            Log.Info("MainWindow.DeviceChange", $"{(removed ? "removed" : "arrived")}: {string.Join(",", letters)}");
+            _viewModel.OnVolumesChanged(removed ? letters : []);
+        }
+        catch (Exception ex) { Log.Warn("MainWindow.DeviceChange", "WM_DEVICECHANGE not handled", ex); }
+    }
+
     private IntPtr WndProc(IntPtr hwnd, int msg, IntPtr wParam, IntPtr lParam, ref bool handled)
     {
+        if (msg == WM_DEVICECHANGE)
+        {
+            OnDeviceChange(wParam, lParam);
+            return IntPtr.Zero;
+        }
         if (msg == 0x0024)
         {
             var monitor = MonitorFromWindow(hwnd, 2);

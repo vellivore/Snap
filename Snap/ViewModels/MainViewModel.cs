@@ -1,6 +1,7 @@
 using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.Diagnostics;
+using System.IO;
 using System.Windows.Threading;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
@@ -304,6 +305,66 @@ public partial class MainViewModel : ObservableObject
             if (tab == null || tab == except) continue;
             if (list.Any(f => FileSystemService.SamePath(f, tab.CurrentPath)))
                 await tab.Refresh();
+        }
+    }
+
+    // ==================== Drives added / removed (#16) ====================
+
+    private DispatcherTimer? _deviceTimer;
+    private readonly HashSet<char> _removedDrives = new();
+
+    /// <summary>
+    /// WM_DEVICECHANGE with a volume (MainWindow.WndProc): a drive appeared or went away.
+    /// Several messages in a row are handled once, 500 ms after the last one.
+    /// </summary>
+    /// <param name="removedLetters">Drive letters of a DBT_DEVICEREMOVECOMPLETE (empty for an arrival).</param>
+    public void OnVolumesChanged(IEnumerable<char> removedLetters)
+    {
+        foreach (var c in removedLetters) _removedDrives.Add(char.ToUpperInvariant(c));
+        if (_deviceTimer == null)
+        {
+            _deviceTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(500) };
+            _deviceTimer.Tick += (_, _) =>
+            {
+                _deviceTimer.Stop();
+                var removed = _removedDrives.ToList();
+                _removedDrives.Clear();
+                ApplyVolumeChangeAsync(removed).SafeFireAndForget("Main.Drives", "ドライブ一覧を更新できません");
+            };
+        }
+        _deviceTimer.Stop();
+        _deviceTimer.Start();
+    }
+
+    /// <summary>
+    /// Rebuilds the tree's drives and every PC view; a tab showing a removed drive goes to the
+    /// PC view (every tab of every pane, not only the selected ones).
+    /// </summary>
+    private async Task ApplyVolumeChangeAsync(IReadOnlyList<char> removed)
+    {
+        Log.Info("Main.Drives", removed.Count > 0
+            ? $"volume change, removed: {string.Join(",", removed)}"
+            : "volume change (arrival)");
+
+        await FolderTree.RefreshDrivesAsync();
+
+        var tabs = AllPanes.SelectMany(p => p.Tabs).ToList();
+        // Which removed drives are really gone (a drive letter can come back at once).
+        var gone = removed.Count == 0
+            ? new HashSet<char>()
+            : await Task.Run(() => removed.Where(c => !Directory.Exists($"{c}:\\")).ToHashSet());
+
+        foreach (var tab in tabs)
+        {
+            if (tab.CurrentPath == FilePaneViewModel.PcViewPath)
+            {
+                await tab.Refresh();
+            }
+            else if (FileSystemService.DriveLetterOf(tab.CurrentPath) is char letter && gone.Contains(letter))
+            {
+                Log.Info("Main.Drives", $"tab on removed drive {letter}: -> PC view ({tab.CurrentPath})");
+                await tab.NavigateToAsync(FilePaneViewModel.PcViewPath);
+            }
         }
     }
 

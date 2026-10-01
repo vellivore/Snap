@@ -122,12 +122,16 @@ public partial class FilePaneControl : UserControl
         {
             oldVm.PropertyChanged -= OnViewModelPropertyChanged;
             oldVm.RevealRequested -= OnRevealRequested;
+            oldVm.ItemsReplacing -= OnItemsReplacing;
+            oldVm.ItemsReplaced -= OnItemsReplaced;
         }
 
         if (e.NewValue is FilePaneViewModel newVm)
         {
             newVm.PropertyChanged += OnViewModelPropertyChanged;
             newVm.RevealRequested += OnRevealRequested;
+            newVm.ItemsReplacing += OnItemsReplacing;
+            newVm.ItemsReplaced += OnItemsReplaced;
             RebuildBreadcrumb(newVm.CurrentPath);
             _shownPath = newVm.CurrentPath;
             // Tab switch (Ctrl+Tab etc.): if the list had the focus, it keeps it.
@@ -239,8 +243,111 @@ public partial class FilePaneControl : UserControl
         });
     }
 
-    private void FileListView_SelectionChanged(object sender, SelectionChangedEventArgs e) =>
+    private void FileListView_SelectionChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (_restoringSelection) return;
         ViewModel?.SetSelection(FileListView.SelectedItems);
+    }
+
+    // ==================== List swapped in the same folder (#16) ====================
+    // Sort, F5, a file operation and the folder watcher swap the whole list in one step. The
+    // scroll position, the focused row and the selection are carried over by path.
+
+    private double _savedVerticalOffset;
+    private bool _savedListHadFocus;
+    private string? _savedFocusedPath;
+    private string? _savedFolder;
+    private bool _restoringSelection;
+
+    private void OnItemsReplacing()
+    {
+        _savedVerticalOffset = FindListScrollViewer()?.VerticalOffset ?? 0;
+        _savedListHadFocus = ListShouldKeepFocus();
+        _savedFocusedPath = FileListView.IsKeyboardFocusWithin
+                            && Keyboard.FocusedElement is ListViewItem { DataContext: FileItem focused }
+            ? focused.FullPath
+            : null;
+        _savedFolder = ViewModel?.CurrentPath;
+    }
+
+    private void OnItemsReplaced(IReadOnlyList<FileItem> reselect)
+    {
+        var folder = _savedFolder;
+        var offset = _savedVerticalOffset;
+        var hadFocus = _savedListHadFocus;
+        var focusedPath = _savedFocusedPath;
+
+        Dispatcher.BeginInvoke(System.Windows.Threading.DispatcherPriority.Loaded, () =>
+        {
+            try
+            {
+                var vm = ViewModel;
+                // Moved to another folder meanwhile: the CurrentPath handler owns the view then.
+                if (vm == null || !FileSystemService.SamePath(vm.CurrentPath, folder)) return;
+
+                FindListScrollViewer()?.ScrollToVerticalOffset(offset);
+
+                if (hadFocus)
+                {
+                    FileListView.UpdateLayout();
+                    var focusItem = (focusedPath != null
+                                        ? vm.Items.FirstOrDefault(i => FileSystemService.SamePath(i.FullPath, focusedPath))
+                                        : null)
+                                    ?? reselect.FirstOrDefault();
+                    if (focusItem != null
+                        && FileListView.ItemContainerGenerator.ContainerFromItem(focusItem) is ListViewItem row)
+                        row.Focus();
+                    else
+                        FileListView.Focus();
+                }
+
+                RestoreSelection(reselect);
+            }
+            catch (Exception ex) { Log.Warn("FilePane.KeepView", "selection / scroll not restored", ex); }
+        });
+    }
+
+    /// <summary>Selects exactly <paramref name="items"/> (reports the selection to the view model once).</summary>
+    private void RestoreSelection(IReadOnlyList<FileItem> items)
+    {
+        var current = new HashSet<object>(FileListView.SelectedItems.Cast<object>(), ReferenceEqualityComparer.Instance);
+        if (current.Count == items.Count && items.All(current.Contains)) return;
+
+        _restoringSelection = true;
+        try
+        {
+            if (items.Count > 0 && items.Count == FileListView.Items.Count)
+            {
+                FileListView.SelectAll();
+            }
+            else
+            {
+                FileListView.UnselectAll();
+                foreach (var item in items)
+                    FileListView.SelectedItems.Add(item);
+            }
+        }
+        finally
+        {
+            _restoringSelection = false;
+        }
+        ViewModel?.SetSelection(FileListView.SelectedItems);
+    }
+
+    private ScrollViewer? FindListScrollViewer()
+    {
+        DependencyObject? node = FileListView;
+        var queue = new Queue<DependencyObject>();
+        queue.Enqueue(node);
+        while (queue.Count > 0)
+        {
+            node = queue.Dequeue();
+            if (node is ScrollViewer sv) return sv;
+            for (int i = 0; i < VisualTreeHelper.GetChildrenCount(node); i++)
+                queue.Enqueue(VisualTreeHelper.GetChild(node, i));
+        }
+        return null;
+    }
 
     /// <summary>
     /// After a rename / new folder (#15): selects <paramref name="item"/> alone and scrolls to it.

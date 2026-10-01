@@ -59,6 +59,34 @@ public static class FileSystemService
     }
 
     /// <summary>
+    /// A UNC path or a path on a mapped network drive (#16: no folder watcher and no per-folder
+    /// icons there). Only asks the drive type (GetDriveType), which does not touch the network.
+    /// </summary>
+    public static bool IsNetworkPath(string? path)
+    {
+        if (string.IsNullOrEmpty(path)) return false;
+        if (path.StartsWith(@"\\")) return true;
+        try
+        {
+            var root = Path.GetPathRoot(path);
+            return !string.IsNullOrEmpty(root) && new DriveInfo(root).DriveType == DriveType.Network;
+        }
+        catch (Exception ex)
+        {
+            Log.Warn("FileSystem.IsNetworkPath", path, ex);
+            return false;
+        }
+    }
+
+    /// <summary>The drive letter (upper case) of a local path such as C:\foo, or null (UNC, PC view).</summary>
+    public static char? DriveLetterOf(string? path)
+    {
+        if (string.IsNullOrEmpty(path) || path.Length < 2 || path[1] != ':' || !char.IsAsciiLetter(path[0]))
+            return null;
+        return char.ToUpperInvariant(path[0]);
+    }
+
+    /// <summary>
     /// The visible disk shares of <paramref name="serverPath"/> (\\server). Hidden ($) and
     /// non-disk shares are left out. Throws <see cref="DirectoryNotFoundException"/> when the
     /// server cannot be enumerated.

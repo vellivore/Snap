@@ -1,6 +1,7 @@
 using System.Collections.ObjectModel;
 using System.Windows.Media;
 using CommunityToolkit.Mvvm.ComponentModel;
+using Snap.Helpers;
 
 namespace Snap.Models;
 
@@ -21,7 +22,8 @@ public partial class TreeNode : ObservableObject
     [ObservableProperty]
     private bool _isSelected;
 
-    public ObservableCollection<TreeNode> Children { get; } = new();
+    /// <summary>Filled in one step when the node is expanded (#16), not child by child.</summary>
+    public BulkObservableCollection<TreeNode> Children { get; } = new();
 
     // Dummy child for lazy loading (shows expand arrow before loading)
     public bool HasDummyChild => Children.Count == 1 && Children[0].FullPath == "__dummy__";

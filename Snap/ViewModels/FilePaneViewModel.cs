@@ -3,6 +3,7 @@ using System.Collections.Specialized;
 using System.Diagnostics;
 using System.IO;
 using System.Windows;
+using System.Windows.Media;
 using CommunityToolkit.Mvvm.ComponentModel;
 using CommunityToolkit.Mvvm.Input;
 using Snap.Helpers;
@@ -11,7 +12,7 @@ using Snap.Services;
 
 namespace Snap.ViewModels;
 
-public partial class FilePaneViewModel : ObservableObject
+public partial class FilePaneViewModel : ObservableObject, IDisposable
 {
     [ObservableProperty]
     private string _currentPath = string.Empty;
@@ -85,10 +86,27 @@ public partial class FilePaneViewModel : ObservableObject
     public event Action<FileItem>? RevealRequested;
 
 
-    public ObservableCollection<FileItem> Items { get; } = new();
+    /// <summary>The rows shown (filtered and sorted). Swapped in one step (#16), never row by row.</summary>
+    public BulkObservableCollection<FileItem> Items { get; } = new();
+
+    /// <summary>Raised right before <see cref="Items"/> is swapped while staying in the same folder
+    /// (sort, refresh, folder watcher): the view remembers its scroll position and focused row.</summary>
+    public event Action? ItemsReplacing;
+
+    /// <summary>Raised right after that swap with the entries that were selected before (by path),
+    /// for the view to select again and restore its scroll position.</summary>
+    public event Action<IReadOnlyList<FileItem>>? ItemsReplaced;
 
     // All items before filtering
     private List<FileItem> _allItems = new();
+
+    // Unreadable entries skipped by the last full load (kept in the status line).
+    private int _skipped;
+
+    // Folder watcher of this tab (#16) and the icon fill of the current listing.
+    private readonly FolderWatcher _watcher;
+    private CancellationTokenSource _iconCts = new();
+    private bool _disposed;
 
     /// <summary>Filter bar text (Ctrl+Shift+F, #14): <see cref="Items"/> shows only the entries of
     /// the folder whose name contains it. Cleared by Esc and by moving to another folder.</summary>
@@ -105,8 +123,8 @@ public partial class FilePaneViewModel : ObservableObject
     partial void OnFilterTextChanged(string value)
     {
         if (_suppressFilterApply) return;
-        ApplySortToItems();
-        UpdateItemCountStatus(skipped: 0);
+        ApplySortToItems(keepView: false);
+        UpdateItemCountStatus();
     }
 
     /// <summary>Ctrl+Shift+F: shows the filter bar (the view focuses it).</summary>
@@ -119,12 +137,14 @@ public partial class FilePaneViewModel : ObservableObject
         FilterText = string.Empty;
     }
 
-    private void UpdateItemCountStatus(int skipped)
+    /// <param name="skipped">Unreadable entries of a new full load; null keeps the last count.</param>
+    private void UpdateItemCountStatus(int? skipped = null)
     {
+        if (skipped is int s) _skipped = s;
         var count = string.IsNullOrEmpty(FilterText)
             ? $"{Items.Count} 項目"
             : $"{Items.Count} / {_allItems.Count} 項目（絞り込み: {FilterText}）";
-        StatusMessage = skipped > 0 ? $"{count}（読めない項目 {skipped} 件を省略）" : count;
+        StatusMessage = _skipped > 0 ? $"{count}（読めない項目 {_skipped} 件を省略）" : count;
     }
 
     // Sorting state
@@ -160,6 +180,8 @@ public partial class FilePaneViewModel : ObservableObject
             initialPath = @"C:\";
         CurrentPath = initialPath;
         AddressText = initialPath;
+        _watcher = new FolderWatcher((folder, names, reloadAll) =>
+            OnFolderChangedAsync(folder, names, reloadAll).SafeFireAndForget("FilePane.Watcher", "フォルダーの変更を反映できません"));
     }
 
     partial void OnCurrentPathChanged(string value) => AddressText = value;
@@ -221,6 +243,7 @@ public partial class FilePaneViewModel : ObservableObject
 
         var gen = Interlocked.Increment(ref _navGeneration);
         bool IsCurrent() => gen == Volatile.Read(ref _navGeneration);
+        var timing = Stopwatch.StartNew();
 
         IsLoading = true;
         StatusMessage = "読み込み中...";
@@ -257,12 +280,17 @@ public partial class FilePaneViewModel : ObservableObject
                     try { IsFilterVisible = false; FilterText = string.Empty; }
                     finally { _suppressFilterApply = false; }
                 }
-                ApplySortToItems();
+                // Same folder (F5, after a file operation): keep the selection and scroll position.
+                ApplySortToItems(keepView: !pathChanged);
                 CurrentPath = path;
                 if (pathChanged || !HasCustomTabHeader)
                     ResetTabHeader();
                 UpdateItemCountStatus(load.Skipped);
+                // Text is on screen now; real folder / drive icons follow from the icon worker (#16).
+                StartIconFill(items, path, timing);
+                _watcher.Watch(path);
             });
+            LogShownTiming(path, items.Count, timing);
 
             // Update navigation history (only after a successful load)
             if (historyIndex is int hi)
@@ -320,6 +348,19 @@ public partial class FilePaneViewModel : ObservableObject
             if (IsCurrent())
                 IsLoading = false;
         }
+    }
+
+    /// <summary>Measurement (#16): logs how long the list took until its text was on screen
+    /// (the Loaded-priority callback runs after layout and render of the new rows).</summary>
+    private static void LogShownTiming(string path, int count, Stopwatch timing)
+    {
+        var applied = timing.ElapsedMilliseconds;
+        Application.Current.Dispatcher.BeginInvoke(System.Windows.Threading.DispatcherPriority.Loaded, () =>
+        {
+            var sinceStart = (DateTime.Now - Process.GetCurrentProcess().StartTime).TotalMilliseconds;
+            Log.Info("FilePane.Timing",
+                $"{path}: {count} items, applied {applied} ms, shown {timing.ElapsedMilliseconds} ms after navigate ({sinceStart:F0} ms after process start)");
+        });
     }
 
     [RelayCommand(CanExecute = nameof(CanGoBack))]
@@ -927,12 +968,16 @@ public partial class FilePaneViewModel : ObservableObject
         if (!dirInfo.Exists)
             throw new DirectoryNotFoundException($"ディレクトリが見つかりません: {path}");
 
+        // Text first (#16): folders get the generic folder icon here and their own icon later
+        // (StartIconFill); files get their extension's cached icon.
+        var (folderIcon, folderType) = IconHelper.GetDefaultFolderIcon();
+
         // Directories first
         foreach (var dir in dirInfo.EnumerateDirectories())
         {
             try
             {
-                var (icon, typeName) = IconHelper.GetIconAndType(dir.FullName, true);
+                var (icon, typeName) = (folderIcon, folderType);
                 items.Add(new FileItem
                 {
                     Name = dir.Name,
@@ -955,7 +1000,7 @@ public partial class FilePaneViewModel : ObservableObject
         {
             try
             {
-                var (icon, typeName) = IconHelper.GetIconAndType(file.FullName, false);
+                var (icon, typeName) = IconHelper.GetFileTypeIcon(file.FullName);
                 items.Add(new FileItem
                 {
                     Name = file.Name,
@@ -1022,23 +1067,288 @@ public partial class FilePaneViewModel : ObservableObject
         ApplySortToItems();
     }
 
-    private void ApplySortToItems()
+    private void ApplySortToItems() => ApplySortToItems(keepView: true);
+
+    /// <summary>The filtered, sorted rows (folders first).</summary>
+    private List<FileItem> BuildSortedView()
     {
         IEnumerable<FileItem> source = _allItems;
         if (!string.IsNullOrEmpty(FilterText))
             source = source.Where(i => i.Name.Contains(FilterText, StringComparison.OrdinalIgnoreCase));
 
-        var dirs = source.Where(i => i.IsDirectory);
-        var files = source.Where(i => !i.IsDirectory);
+        var dirs = ApplySortOrder(source.Where(i => i.IsDirectory));
+        var files = ApplySortOrder(source.Where(i => !i.IsDirectory));
+        return dirs.Concat(files).ToList();
+    }
 
-        dirs = ApplySortOrder(dirs);
-        files = ApplySortOrder(files);
+    /// <summary>
+    /// Swaps <see cref="Items"/> for the filtered, sorted rows in one step (#16).
+    /// <paramref name="keepView"/>: the list still shows the same folder, so the view is asked to
+    /// select the same entries again (matched by path) and to keep its scroll position.
+    /// </summary>
+    private void ApplySortToItems(bool keepView)
+    {
+        var sorted = BuildSortedView();
+        if (!keepView)
+        {
+            Items.ReplaceAll(sorted);
+            return;
+        }
 
-        var sorted = dirs.Concat(files).ToList();
+        var selectedPaths = SelectedItems.Select(i => i.FullPath).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        ItemsReplacing?.Invoke();
+        Items.ReplaceAll(sorted);
+        IReadOnlyList<FileItem> reselect = selectedPaths.Count == 0
+            ? []
+            : sorted.Where(i => selectedPaths.Contains(i.FullPath)).ToList();
+        ItemsReplaced?.Invoke(reselect);
+    }
 
-        Items.Clear();
-        foreach (var item in sorted)
-            Items.Add(item);
+    /// <summary>
+    /// Brings <see cref="Items"/> in line with the sorted view after a few entries changed
+    /// (<paramref name="touched"/>: added or updated), with single inserts / moves / removes so
+    /// the selection and scroll position stay. Rows that were not touched keep their relative
+    /// order, so only touched rows move. Falls back to a full swap if that does not hold.
+    /// </summary>
+    private void SyncItemsToSorted(HashSet<FileItem> touched)
+    {
+        var sorted = BuildSortedView();
+        var wanted = new HashSet<FileItem>(sorted, ReferenceEqualityComparer.Instance);
+
+        for (int i = Items.Count - 1; i >= 0; i--)
+            if (!wanted.Contains(Items[i])) Items.RemoveAt(i);
+
+        var present = new HashSet<FileItem>(Items, ReferenceEqualityComparer.Instance);
+        int ops = 0;
+        int k = 0;
+        while (k < sorted.Count)
+        {
+            var want = sorted[k];
+            if (k < Items.Count && ReferenceEquals(Items[k], want)) { k++; continue; }
+            if (++ops > 400) break;
+
+            if (k < Items.Count && touched.Contains(Items[k]))
+            {
+                // A touched row that belongs further down: take it out, it is put back when reached.
+                present.Remove(Items[k]);
+                Items.RemoveAt(k);
+                continue;
+            }
+            if (!present.Contains(want))
+            {
+                Items.Insert(k, want);
+                present.Add(want);
+                k++;
+                continue;
+            }
+            if (!touched.Contains(want)) { ops = int.MaxValue; break; } // order assumption broken
+            var j = Items.IndexOf(want);
+            Items.Move(j, k);
+            k++;
+        }
+
+        if (ops > 400 || Items.Count != sorted.Count)
+        {
+            Log.Info("FilePane.Sync", $"incremental update gave up after {ops} ops; full swap");
+            ApplySortToItems(keepView: true);
+        }
+    }
+
+    // ==================== Folder watcher (#16) ====================
+
+    /// <summary>
+    /// A batch from this tab's <see cref="FolderWatcher"/>: re-reads each changed name and adds,
+    /// updates or removes its row; <paramref name="reloadAll"/> (many changes or a lost event
+    /// buffer) reloads the whole folder in place. Ignored when the tab has moved on meanwhile.
+    /// </summary>
+    private async Task OnFolderChangedAsync(string folder, IReadOnlyCollection<string> names, bool reloadAll)
+    {
+        if (_disposed || !FileSystemService.SamePath(folder, CurrentPath)) return;
+        if (reloadAll)
+        {
+            Log.Info("FilePane.Watcher", $"{folder}: many changes or lost events, full reload");
+            await ReloadInPlaceAsync();
+            return;
+        }
+
+        var gen = Volatile.Read(ref _navGeneration);
+        var tracker = _usageTracker;
+        var states = await Task.Run(() => names.Select(n => (Name: n, State: ReadEntry(folder, n, tracker))).ToList());
+        if (_disposed || gen != Volatile.Read(ref _navGeneration) || !FileSystemService.SamePath(folder, CurrentPath))
+            return;
+
+        var byName = new Dictionary<string, FileItem>(StringComparer.OrdinalIgnoreCase);
+        foreach (var item in _allItems) byName.TryAdd(item.Name, item);
+
+        var touched = new HashSet<FileItem>(ReferenceEqualityComparer.Instance);
+        var removed = 0;
+        var newFolders = new List<FileItem>();
+        foreach (var (name, state) in states)
+        {
+            if (!state.Ok) continue; // could not be read now: leave the row as it is
+            byName.TryGetValue(name, out var existing);
+            var fresh = state.Item;
+
+            if (fresh == null)
+            {
+                if (existing != null && _allItems.Remove(existing)) removed++;
+                continue;
+            }
+
+            if (existing != null && existing.IsDirectory == fresh.IsDirectory
+                && string.Equals(existing.Name, fresh.Name, StringComparison.Ordinal))
+            {
+                // Same entry: update in place (the row and its selection stay).
+                if (existing.LastModified != fresh.LastModified || existing.Size != fresh.Size)
+                {
+                    existing.LastModified = fresh.LastModified;
+                    existing.Size = fresh.Size;
+                    touched.Add(existing);
+                }
+                continue;
+            }
+
+            // New entry, or the name's case / kind changed: a new row.
+            if (existing != null) _allItems.Remove(existing);
+            _allItems.Add(fresh);
+            byName[fresh.Name] = fresh;
+            touched.Add(fresh);
+            if (fresh.IsDirectory) newFolders.Add(fresh);
+        }
+
+        if (touched.Count == 0 && removed == 0) return;
+        SyncItemsToSorted(touched);
+        UpdateItemCountStatus();
+        if (newFolders.Count > 0 && !FileSystemService.IsNetworkPath(folder))
+            IconHelper.QueuePathIcons(newFolders, i => i.FullPath, SetIcon, _iconCts.Token);
+    }
+
+    private readonly record struct EntryState(bool Ok, FileItem? Item);
+
+    /// <summary>
+    /// The current state of <paramref name="name"/> in <paramref name="folder"/> (thread pool):
+    /// a fresh row, null when it no longer exists, or not Ok when it could not be read.
+    /// Looked up by enumeration so the row gets the name's real case.
+    /// </summary>
+    private static EntryState ReadEntry(string folder, string name, UsageTracker? tracker)
+    {
+        try
+        {
+            var info = new DirectoryInfo(folder).EnumerateFileSystemInfos(name)
+                .FirstOrDefault(i => string.Equals(i.Name, name, StringComparison.OrdinalIgnoreCase));
+            if (info == null) return new EntryState(true, null);
+
+            FileItem item;
+            if (info is DirectoryInfo dir)
+            {
+                var (icon, typeName) = IconHelper.GetDefaultFolderIcon();
+                item = new FileItem
+                {
+                    Name = dir.Name,
+                    FullPath = dir.FullName,
+                    LastModified = dir.LastWriteTime,
+                    IsDirectory = true,
+                    Type = typeName,
+                    Icon = icon,
+                };
+            }
+            else
+            {
+                var file = (FileInfo)info;
+                var (icon, typeName) = IconHelper.GetFileTypeIcon(file.FullName);
+                item = new FileItem
+                {
+                    Name = file.Name,
+                    FullPath = file.FullName,
+                    LastModified = file.LastWriteTime,
+                    Size = file.Length,
+                    IsDirectory = false,
+                    Type = typeName,
+                    Icon = icon,
+                };
+            }
+            if (tracker != null) item.FrequencyLevel = tracker.GetFrequencyLevel(item.FullPath);
+            return new EntryState(true, item);
+        }
+        catch (DirectoryNotFoundException)
+        {
+            return new EntryState(true, null);
+        }
+        catch (Exception ex)
+        {
+            Log.Warn("FilePane.Watcher", $"cannot read {Path.Combine(folder, name)}", ex);
+            return new EntryState(false, null);
+        }
+    }
+
+    /// <summary>
+    /// Reloads the folder shown without being a navigation: no "読み込み中", no history entry, and
+    /// it never cancels a navigation the user started (it is dropped if one starts meanwhile).
+    /// Selection and scroll position stay.
+    /// </summary>
+    private async Task ReloadInPlaceAsync()
+    {
+        var path = CurrentPath;
+        var gen = Volatile.Read(ref _navGeneration);
+        var tracker = _usageTracker;
+        try
+        {
+            var load = await Task.Run(() => path == PcViewPath ? LoadDrives() : LoadDirectory(path));
+            if (_disposed || gen != Volatile.Read(ref _navGeneration) || !FileSystemService.SamePath(path, CurrentPath))
+                return;
+            if (tracker != null)
+                foreach (var item in load.Items)
+                    item.FrequencyLevel = tracker.GetFrequencyLevel(item.FullPath);
+            _allItems = load.Items;
+            ApplySortToItems(keepView: true);
+            UpdateItemCountStatus(load.Skipped);
+            StartIconFill(load.Items, path, timing: null);
+        }
+        catch (DirectoryNotFoundException ex)
+        {
+            Log.Warn("FilePane.Reload", $"folder gone: {path}", ex);
+            if (FileSystemService.SamePath(path, CurrentPath))
+                StatusMessage = $"フォルダーが見つかりません（削除または移動された可能性があります）: {path}";
+        }
+        catch (Exception ex)
+        {
+            Log.Warn("FilePane.Reload", path, ex);
+        }
+    }
+
+    // ==================== Icons after the text (#16) ====================
+
+    private static void SetIcon(FileItem item, ImageSource icon) => item.Icon = icon;
+
+    /// <summary>
+    /// Queues the real icons of the listed folders on the icon worker (the rows already show the
+    /// generic folder icon). The previous listing's pending icons are dropped. Not done for the PC
+    /// view (drive icons are read with the list) or network locations (no network access).
+    /// </summary>
+    private void StartIconFill(List<FileItem> items, string path, Stopwatch? timing)
+    {
+        if (_disposed) return; // a load that finished after the tab was closed
+        _iconCts.Cancel();
+        _iconCts.Dispose();
+        _iconCts = new CancellationTokenSource();
+
+        if (path == PcViewPath || FileSystemService.IsNetworkPath(path)) return;
+        var folders = items.Where(i => i.IsDirectory).ToList();
+        if (folders.Count == 0) return;
+
+        Action? completed = timing == null ? null : () =>
+            Log.Info("FilePane.Timing", $"{path}: icons of {folders.Count} folders filled {timing.ElapsedMilliseconds} ms after navigate");
+        IconHelper.QueuePathIcons(folders, i => i.FullPath, SetIcon, _iconCts.Token, completed);
+    }
+
+    /// <summary>Tab closed: stops the folder watcher and pending icon work.</summary>
+    public void Dispose()
+    {
+        if (_disposed) return;
+        _disposed = true;
+        _watcher.Dispose();
+        _iconCts.Cancel();
+        _iconCts.Dispose();
     }
 
     private IEnumerable<FileItem> ApplySortOrder(IEnumerable<FileItem> items)

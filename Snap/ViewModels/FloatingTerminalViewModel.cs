@@ -21,14 +21,6 @@ public partial class FloatingTerminalViewModel : ObservableObject, IDisposable
     private EventHandler? _exitedHandler;
     private bool _disposed;
 
-    // Unused but kept for compatibility (XAML bindings)
-    [ObservableProperty]
-    private string _outputText = string.Empty;
-    [ObservableProperty]
-    private string _inputText = string.Empty;
-    [ObservableProperty]
-    private string _promptText = ">";
-
     /// <summary>新しいシェルを起動するときの作業フォルダ（開く直前にアクティブペインのフォルダが入る）。</summary>
     public string CurrentDirectory { get; set; } = @"C:\";
 
@@ -45,8 +37,11 @@ public partial class FloatingTerminalViewModel : ObservableObject, IDisposable
     public bool IsShellRunning =>
         ShellWindowHandle != IntPtr.Zero && _shellProcess is { } p && !HasExitedSafe(p);
 
-    // The folder Snap last put the shell in (start directory or the last Set-Location it sent).
-    private string? _shellDirectory;
+    /// <summary>
+    /// 直近の起動でコンソール窓を埋め込めず、シェルを別ウィンドウのまま残した（#24）。
+    /// このとき枠を閉じても MainWindow は Activate しない（別窓が Snap の後ろに回るため）。
+    /// </summary>
+    public bool LeftAsSeparateWindow { get; private set; }
 
     // The console's client process (pwsh): the PID the console window reports, used to attach.
     private uint _consoleClientPid;
@@ -153,6 +148,9 @@ public partial class FloatingTerminalViewModel : ObservableObject, IDisposable
     private const int WS_SYSMENU = 0x00080000;
     private const ushort KEY_EVENT = 0x0001;
     private const ushort VK_RETURN = 0x0D;
+    private const ushort VK_ESCAPE = 0x1B;
+    /// <summary>WriteToConsole の文字列中で Esc キーを表す文字（PSReadLine では入力行の取り消し）。</summary>
+    private const char EscapeKey = '\u001b';
     private const uint GENERIC_READ_WRITE = 0xC0000000;
     private const uint FILE_SHARE_READ_WRITE = 0x00000003;
     private const uint OPEN_EXISTING = 3;
@@ -182,27 +180,26 @@ public partial class FloatingTerminalViewModel : ObservableObject, IDisposable
     /// <summary>
     /// シェルを <paramref name="path"/> へ移す（#18）。<c>Set-Location -LiteralPath '...'</c> と Enter を
     /// コンソールの入力バッファへ書く（pwsh の標準入力は持たないため）。
-    /// <paramref name="onlyIfChanged"/> のときは Snap が最後に移したフォルダと同じなら送らない。
+    /// 先に Esc を 1 つ送り、PSReadLine の入力途中の行を消してから打つ（#24）。
+    /// シェル内で手で cd した場合を知る手段がないので、同じフォルダかどうかは比べずに常に送る（#24）。
     /// </summary>
-    public bool ChangeDirectory(string path, bool onlyIfChanged = false)
+    public bool ChangeDirectory(string path)
     {
         if (!IsShellRunning || string.IsNullOrEmpty(path)) return false;
-        if (onlyIfChanged && string.Equals(_shellDirectory, path, StringComparison.OrdinalIgnoreCase))
-            return false;
 
         var command = "Set-Location -LiteralPath '" + path.Replace("'", "''") + "'";
-        if (!WriteToConsole(command + "\r"))
+        if (!WriteToConsole(EscapeKey + command + "\r"))
         {
             Snap.Services.Log.UserError("Terminal.ChangeDirectory", "ターミナルへ cd を送れません");
             return false;
         }
-        _shellDirectory = path;
         Snap.Services.Log.Info("Terminal.ChangeDirectory", path);
         return true;
     }
 
     /// <summary>
-    /// Types <paramref name="text"/> into the shell's console as key events (CR = Enter).
+    /// Types <paramref name="text"/> into the shell's console as key events (CR = Enter,
+    /// <see cref="EscapeKey"/> = Esc).
     /// Posting WM_CHAR / WM_KEYDOWN to the console window does not reach the shell, so Snap
     /// (a GUI process without a console of its own) attaches to the console for the duration
     /// of one WriteConsoleInput and detaches again.
@@ -236,7 +233,7 @@ public partial class FloatingTerminalViewModel : ObservableObject, IDisposable
                 var i = 0;
                 foreach (var ch in text)
                 {
-                    var vk = ch == '\r' ? VK_RETURN : (ushort)0;
+                    var vk = ch switch { '\r' => VK_RETURN, EscapeKey => VK_ESCAPE, _ => (ushort)0 };
                     records[i++] = new KEY_INPUT_RECORD { EventType = KEY_EVENT, bKeyDown = 1, wRepeatCount = 1, wVirtualKeyCode = vk, UnicodeChar = ch };
                     records[i++] = new KEY_INPUT_RECORD { EventType = KEY_EVENT, bKeyDown = 0, wRepeatCount = 1, wVirtualKeyCode = vk, UnicodeChar = ch };
                 }
@@ -421,7 +418,7 @@ public partial class FloatingTerminalViewModel : ObservableObject, IDisposable
 
             _shellProcess.Start();
             var pid = _shellProcess.Id;
-            _shellDirectory = workDir;
+            LeftAsSeparateWindow = false;
 
             // conhost の ConsoleWindowClass ウィンドウを探す（100ms 間隔・最大 5 秒・#22）
             ShellWindowHandle = IntPtr.Zero;
@@ -457,6 +454,7 @@ public partial class FloatingTerminalViewModel : ObservableObject, IDisposable
                 // Leave the shell running as its own window and drop the empty frame.
                 Snap.Services.Log.UserError("Terminal.StartShell", "ターミナルを埋め込めません（別ウィンドウで開いています）");
                 Snap.Services.Log.Info("Terminal.StartShell", $"no ConsoleWindowClass for conhost {pid}: {seen}");
+                LeftAsSeparateWindow = true;
                 IsVisible = false;
             }
         }
@@ -471,7 +469,6 @@ public partial class FloatingTerminalViewModel : ObservableObject, IDisposable
     {
         ShellWindowHandle = IntPtr.Zero;
         EmbeddedHost = IntPtr.Zero;
-        _shellDirectory = null;
         _consoleClientPid = 0;
         if (_shellProcess != null)
         {

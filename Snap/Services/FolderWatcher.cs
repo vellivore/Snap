@@ -51,7 +51,8 @@ public sealed class FolderWatcher : IDisposable
 
     /// <summary>
     /// Watches <paramref name="path"/> (no-op when it is already watched). Null, the PC view and
-    /// network locations stop watching. Failures are logged and leave the tab unwatched.
+    /// network locations and folders that do not exist stop watching without a log line.
+    /// Other failures are logged and leave the tab unwatched.
     /// </summary>
     public void Watch(string? path)
     {
@@ -63,8 +64,9 @@ public sealed class FolderWatcher : IDisposable
 
             if (string.IsNullOrEmpty(path)
                 || path == ViewModels.FilePaneViewModel.PcViewPath
-                || FileSystemService.IsNetworkPath(path))
-                return;
+                || FileSystemService.IsNetworkPath(path)
+                || !Directory.Exists(path))
+                return; // not watchable (#24): quietly unwatched, no log line
 
             try
             {

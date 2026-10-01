@@ -23,7 +23,7 @@ public class TerminalSettings
     /// <summary>Frame size, resized by dragging its right / bottom edge. Minimum 400 x 200.</summary>
     public double Width { get; set; } = 800;
     public double Height { get; set; } = 450;
-    /// <summary>On opening, cd the shell to the active pane's folder (when it moved since). Off by default.</summary>
+    /// <summary>On opening, cd the shell to the active pane's folder (every time, #24). Off by default.</summary>
     public bool FollowActivePane { get; set; }
 }
 

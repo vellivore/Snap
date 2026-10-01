@@ -22,17 +22,50 @@ public partial class FolderTreeControl : UserControl
         FolderTree.AddHandler(MouseLeftButtonDownEvent, new MouseButtonEventHandler((_, _) => EndUserInput()), true);
         FolderTree.AddHandler(PreviewKeyDownEvent, new KeyEventHandler(OnPreviewKeyDown), true);
         FolderTree.AddHandler(KeyDownEvent, new KeyEventHandler(OnKeyDownDone), true);
+        FolderTree.AddHandler(PreviewMouseLeftButtonUpEvent, new MouseButtonEventHandler(OnPreviewMouseUp), true);
     }
 
     // True while a mouse click or a selection key is being handled by the tree.
     private bool _userInput;
 
+    // The node that was already selected when the left button went down on it (#24), or null.
+    // Clicking it again does not change the selection, so the Selected event does not fire;
+    // the button-up on the same node navigates instead (e.g. back from a folder the tree
+    // could not sync to, such as one under a hidden folder).
+    private TreeNode? _reclickNode;
+
     private void OnPreviewMouseDown(object sender, MouseButtonEventArgs e)
     {
+        _reclickNode = null;
         // A click on the expander arrow only expands / collapses (it does not select either).
         if (FindAncestor<System.Windows.Controls.Primitives.ToggleButton>(e.OriginalSource as DependencyObject) != null)
             return;
         _userInput = true;
+        if (FindItem(e.OriginalSource as DependencyObject) is { IsSelected: true, DataContext: TreeNode node })
+            _reclickNode = node;
+    }
+
+    private void OnPreviewMouseUp(object sender, MouseButtonEventArgs e)
+    {
+        var node = _reclickNode;
+        _reclickNode = null;
+        if (node == null || ViewModel == null) return;
+        if (FindItem(e.OriginalSource as DependencyObject) is { IsSelected: true } tvi
+            && ReferenceEquals(tvi.DataContext, node))
+            ViewModel.OnNodeSelected(node);
+    }
+
+    /// <summary>The TreeViewItem that contains <paramref name="d"/> (the innermost one), or null.</summary>
+    private static TreeViewItem? FindItem(DependencyObject? d)
+    {
+        while (d != null)
+        {
+            if (d is TreeViewItem tvi) return tvi;
+            d = d is System.Windows.Media.Visual or System.Windows.Media.Media3D.Visual3D
+                ? System.Windows.Media.VisualTreeHelper.GetParent(d)
+                : LogicalTreeHelper.GetParent(d);
+        }
+        return null;
     }
 
     private void OnPreviewKeyDown(object sender, KeyEventArgs e)

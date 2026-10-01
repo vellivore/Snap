@@ -50,7 +50,7 @@ WPF製 4ペイン ファイルエクスプローラ（Tablacus Explorer 代替�
 - PC ビューのドライブには使用率のバーと「空き / 全体」を出します。準備できていないドライブは「—」です。
 - 並べ替えはタブごと、列幅は全ペイン共通で、次回の起動に引き継ぎます。
 - 隠しファイル（隠し属性の項目）は既定では表示しません。v1.7 までは一覧に出ていたので、出したいときは Ctrl+H で切り替えてください。ツリーも同じ判定（隠し属性）です。
-- ターミナルを開いたときに操作中のペインのフォルダへ自動で移したいときは、settings.json の `"terminal"` にある `"followActivePane"` を `true` にします（既定は `false`。前回 Snap が移したフォルダから変わったときだけ `Set-Location` を送ります）。
+- ターミナルを開いたときに操作中のペインのフォルダへ自動で移したいときは、settings.json の `"terminal"` にある `"followActivePane"` を `true` にします（既定は `false`。開くたびに `Set-Location` を送ります）。
 
 ### コマンドパレットの使い方
 
@@ -60,7 +60,7 @@ WPF製 4ペイン ファイルエクスプローラ（Tablacus Explorer 代替�
 | `*.cs` / `ext:cs` | 拡張子フィルタ付き検索 |
 | `content:keyword` | ファイル内容検索（grep） |
 | `/command` | アプリコマンド（new tab, close tab, refresh, hidden, settings, terminal） |
-| `/cd` | ターミナルを操作中のペインのフォルダへ移す（`Set-Location -LiteralPath`。閉じていれば開く） |
+| `/cd` | ターミナルを操作中のペインのフォルダへ移す（入力途中の行を Esc で消してから `Set-Location -LiteralPath`。閉じていれば開く） |
 | `/terminal kill` | ターミナルのシェルを終了して新しく起動し直す |
 | `/copy to 右上` / `/move to 左下` | 操作中のペインで選んだ項目を、指定したペイン（左上・右上・左下・右下）のフォルダへコピー / 移動 |
 | `C:\path` / `~` | パスナビゲート |

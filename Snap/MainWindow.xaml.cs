@@ -121,6 +121,9 @@ public partial class MainWindow : Window
             else
             {
                 UninstallKeyboardHook();
+                // The shell could not be embedded and was left as its own window (#24): do not
+                // pull Snap in front of it.
+                if (_viewModel.Terminal.LeftAsSeparateWindow) return;
                 // The console window had the keyboard: give it back to Snap's active list.
                 Activate();
                 if (_viewModel.ActivePane is { } pane) FocusPane(pane);
@@ -834,7 +837,7 @@ public partial class MainWindow : Window
         {
             await EmbedTerminalAsync(term);
             if (allowFollow && term.FollowActivePane && !string.IsNullOrEmpty(activeDir))
-                term.ChangeDirectory(activeDir, onlyIfChanged: true);
+                term.ChangeDirectory(activeDir);
             return;
         }
 

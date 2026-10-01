@@ -126,43 +126,87 @@ public partial class FloatingTerminalViewModel : ObservableObject, IDisposable
         ShowWindow(ShellWindowHandle, 1); // SW_SHOWNORMAL
     }
 
-    /// <summary>
-    /// プロセスIDに関連するウィンドウを EnumWindows で探す。
-    /// Windows Terminal がデフォルトターミナルの場合、MainWindowHandle では
-    /// 実際のコンソールウィンドウを取得できないため、この方式を使う。
-    /// ConsoleWindowClass を優先し、なければ最初の可視ウィンドウを返す。
-    /// </summary>
-    private IntPtr FindWindowByProcessTree(int pid)
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+    private struct PROCESSENTRY32W
     {
+        public uint dwSize;
+        public uint cntUsage;
+        public uint th32ProcessID;
+        public IntPtr th32DefaultHeapID;
+        public uint th32ModuleID;
+        public uint cntThreads;
+        public uint th32ParentProcessID;
+        public int pcPriClassBase;
+        public uint dwFlags;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 260)]
+        public string szExeFile;
+    }
+
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern IntPtr CreateToolhelp32Snapshot(uint dwFlags, uint th32ProcessID);
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode)]
+    private static extern bool Process32FirstW(IntPtr hSnapshot, ref PROCESSENTRY32W lppe);
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode)]
+    private static extern bool Process32NextW(IntPtr hSnapshot, ref PROCESSENTRY32W lppe);
+
+    [DllImport("kernel32.dll")]
+    private static extern bool CloseHandle(IntPtr hObject);
+
+    private const uint TH32CS_SNAPPROCESS = 0x00000002;
+
+    /// <summary>conhost の PID とその子（pwsh）の PID。</summary>
+    private static HashSet<uint> GetProcessFamily(int conhostPid)
+    {
+        var pids = new HashSet<uint> { (uint)conhostPid };
+        var snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+        if (snap == IntPtr.Zero || snap == new IntPtr(-1)) return pids;
+        try
+        {
+            var e = new PROCESSENTRY32W { dwSize = (uint)Marshal.SizeOf<PROCESSENTRY32W>() };
+            if (Process32FirstW(snap, ref e))
+            {
+                do
+                {
+                    if (e.th32ParentProcessID == (uint)conhostPid) pids.Add(e.th32ProcessID);
+                } while (Process32NextW(snap, ref e));
+            }
+        }
+        finally { CloseHandle(snap); }
+        return pids;
+    }
+
+    /// <summary>
+    /// conhost が作ったコンソールウィンドウ（ConsoleWindowClass）を探す（#22）。
+    /// コンソールウィンドウの GetWindowThreadProcessId は conhost ではなく接続しているクライアント
+    /// （pwsh）の PID を返すため、conhost とその子の両方の PID で照合する。
+    /// PseudoConsoleWindow（Windows Terminal 経由の ConPTY）は埋め込めないので対象にしない。
+    /// </summary>
+    private static IntPtr FindConsoleWindow(int conhostPid, out string seen)
+    {
+        var pids = GetProcessFamily(conhostPid);
         IntPtr found = IntPtr.Zero;
-        var candidates = new List<(IntPtr hwnd, string className)>();
+        var others = new List<string>();
 
         EnumWindows((hWnd, _) =>
         {
             GetWindowThreadProcessId(hWnd, out uint windowPid);
-            if (windowPid == (uint)pid && IsWindowVisible(hWnd))
+            if (!pids.Contains(windowPid)) return true;
+            var sb = new StringBuilder(256);
+            GetClassName(hWnd, sb, 256);
+            var cls = sb.ToString();
+            if (cls == "ConsoleWindowClass")
             {
-                var sb = new StringBuilder(256);
-                GetClassName(hWnd, sb, 256);
-                candidates.Add((hWnd, sb.ToString()));
+                found = hWnd;
+                others.Add($"{cls}(pid {windowPid}, matched)");
+                return false;
             }
+            others.Add($"{cls}(pid {windowPid})");
             return true;
         }, IntPtr.Zero);
 
-        // ConsoleWindowClass を優先
-        foreach (var (hwnd, cls) in candidates)
-        {
-            if (cls == "ConsoleWindowClass")
-            {
-                found = hwnd;
-                break;
-            }
-        }
-
-        // なければ最初の可視ウィンドウ
-        if (found == IntPtr.Zero && candidates.Count > 0)
-            found = candidates[0].hwnd;
-
+        seen = $"pids [{string.Join(",", pids)}] other windows [{string.Join(", ", others)}]";
         return found;
     }
 
@@ -204,9 +248,10 @@ public partial class FloatingTerminalViewModel : ObservableObject, IDisposable
             _shellProcess.Start();
             var pid = _shellProcess.Id;
 
-            // conhost の ConsoleWindowClass ウィンドウを EnumWindows で探す
+            // conhost の ConsoleWindowClass ウィンドウを探す（100ms 間隔・最大 5 秒・#22）
             ShellWindowHandle = IntPtr.Zero;
-            for (int i = 0; i < 50; i++) // max 5 seconds
+            string seen = "";
+            for (int i = 0; i < 50; i++)
             {
                 await Task.Delay(100);
 
@@ -216,10 +261,12 @@ public partial class FloatingTerminalViewModel : ObservableObject, IDisposable
                 if (_disposed || !ReferenceEquals(_shellProcess, proc))
                     return;
 
-                var hwnd = FindWindowByProcessTree(pid);
+                var hwnd = FindConsoleWindow(pid, out seen);
                 if (hwnd != IntPtr.Zero)
                 {
                     ShellWindowHandle = hwnd;
+                    Snap.Services.Log.Info("Terminal.StartShell",
+                        $"console window {hwnd:X} found after {(i + 1) * 100} ms (conhost {pid}; {seen})");
                     break;
                 }
             }
@@ -228,6 +275,13 @@ public partial class FloatingTerminalViewModel : ObservableObject, IDisposable
             {
                 ShowWindow(ShellWindowHandle, 0); // SW_HIDE
                 ShellWindowReady?.Invoke();
+            }
+            else
+            {
+                // Leave the shell running as its own window and drop the empty frame.
+                Snap.Services.Log.UserError("Terminal.StartShell", "ターミナルを埋め込めません（別ウィンドウで開いています）");
+                Snap.Services.Log.Info("Terminal.StartShell", $"no ConsoleWindowClass for conhost {pid}: {seen}");
+                IsVisible = false;
             }
         }
         catch (Exception ex)

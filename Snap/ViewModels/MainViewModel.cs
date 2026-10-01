@@ -22,6 +22,10 @@ public partial class MainViewModel : ObservableObject
     public UsageTracker UsageTracker { get; } = new();
     public CommandPaletteViewModel CommandPalette { get; } = new();
     public FloatingTerminalViewModel Terminal { get; } = new();
+
+    /// <summary>Shows the embedded terminal (the view owns the HwndHost). The argument says
+    /// whether Terminal.FollowActivePane may cd on this open. Set by MainWindow (#18).</summary>
+    public Func<bool, Task>? ShowTerminal { get; set; }
     public SidebarViewModel Sidebar { get; } = new();
 
     /// <summary>The four panes in a fixed order (top-left, top-right, bottom-left, bottom-right).</summary>
@@ -517,7 +521,28 @@ public partial class MainViewModel : ObservableObject
             OpenExternalTerminal();
             return Task.CompletedTask;
         }),
+        new("cd", "Terminal: cd to Active Folder", "\uE8DA", CdTerminalToActiveFolderAsync),
+        new("terminal kill", "Restart Terminal (kill)", "\uE777", RestartTerminalAsync),
     ];
+
+    /// <summary>/cd: moves the embedded shell to the active tab's folder, opening it if needed (#18).
+    /// A shell started here already begins in that folder.</summary>
+    private async Task CdTerminalToActiveFolderAsync()
+    {
+        var dir = ActiveTab?.CurrentPath;
+        if (string.IsNullOrEmpty(dir) || ShowTerminal == null) return;
+        var wasRunning = Terminal.IsShellRunning;
+        await ShowTerminal(false);
+        if (wasRunning && Terminal.ChangeDirectory(dir))
+            ShowStatus($"ターミナル: {dir}");
+    }
+
+    /// <summary>/terminal kill: ends the shell and starts a new one (#18).</summary>
+    private async Task RestartTerminalAsync()
+    {
+        Terminal.Kill();
+        if (ShowTerminal != null) await ShowTerminal(false);
+    }
 
     private Task NavigateActiveTabAsync(string path) =>
         CurrentPane.SelectedTab?.NavigateToAsync(path) ?? Task.CompletedTask;

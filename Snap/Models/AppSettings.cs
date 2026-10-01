@@ -14,6 +14,17 @@ public class AppSettings
     public bool ShowHidden { get; set; }
     /// <summary>File list column widths by column key (Name / LastModified / Size / Type), one set for all panes (#17).</summary>
     public Dictionary<string, double> ColumnWidths { get; set; } = new();
+    /// <summary>Floating terminal size and behavior (#18).</summary>
+    public TerminalSettings Terminal { get; set; } = new();
+}
+
+public class TerminalSettings
+{
+    /// <summary>Frame size, resized by dragging its right / bottom edge. Minimum 400 x 200.</summary>
+    public double Width { get; set; } = 800;
+    public double Height { get; set; } = 450;
+    /// <summary>On opening, cd the shell to the active pane's folder (when it moved since). Off by default.</summary>
+    public bool FollowActivePane { get; set; }
 }
 
 public class WindowSettings

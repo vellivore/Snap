@@ -29,6 +29,13 @@
         <KeyBinding Gesture="Ctrl+H" Command="{Binding ToggleHiddenCommand}"/>
     </Window.InputBindings>
 
+    <Window.Resources>
+        <!-- Invisible but hit-testable resize grip of the floating terminal (#18). -->
+        <ControlTemplate x:Key="TerminalGripTemplate" TargetType="Thumb">
+            <Border Background="Transparent"/>
+        </ControlTemplate>
+    </Window.Resources>
+
     <Border Background="#BF181820" CornerRadius="8" BorderBrush="#50FFFFFF" BorderThickness="1">
         <Grid>
             <Grid.RowDefinitions>
@@ -320,6 +327,8 @@
                     VerticalAlignment="Center"
                     Width="800"
                     Height="450"
+                    MinWidth="400"
+                    MinHeight="200"
                     Background="#F0101018"
                     BorderBrush="#500078D4"
                     BorderThickness="1"
@@ -332,10 +341,15 @@
                     <Grid.RowDefinitions>
                         <RowDefinition Height="Auto"/>
                         <RowDefinition Height="*"/>
+                        <RowDefinition Height="6"/>
                     </Grid.RowDefinitions>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="6"/>
+                    </Grid.ColumnDefinitions>
 
                     <!-- Terminal title bar -->
-                    <Border Grid.Row="0" Background="#20FFFFFF" CornerRadius="6,6,0,0" Padding="10,4">
+                    <Border Grid.Row="0" Grid.ColumnSpan="2" Background="#20FFFFFF" CornerRadius="6,6,0,0" Padding="10,4">
                         <DockPanel>
                             <TextBlock Text="Terminal (pwsh)"
                                        Foreground="#909098" FontSize="12" FontWeight="SemiBold"
@@ -352,10 +366,19 @@
                     <!-- Console host panel -->
                     <Border Grid.Row="1"
                             Background="#0C0C14" ClipToBounds="True"
-                            CornerRadius="0,0,6,6">
+                            CornerRadius="0,0,0,0">
                         <views:TerminalHostControl x:Name="TerminalHost"
                                                     SizeChanged="TerminalHost_SizeChanged"/>
                     </Border>
+
+                    <!-- Resize grips (#18). Outside the console host: the HwndHost's Win32 window
+                         would take the mouse over its own area. -->
+                    <Thumb Grid.Row="0" Grid.RowSpan="2" Grid.Column="1" Tag="R" Cursor="SizeWE"
+                           DragDelta="TerminalResize_DragDelta" Template="{StaticResource TerminalGripTemplate}"/>
+                    <Thumb Grid.Row="2" Grid.Column="0" Tag="B" Cursor="SizeNS"
+                           DragDelta="TerminalResize_DragDelta" Template="{StaticResource TerminalGripTemplate}"/>
+                    <Thumb Grid.Row="2" Grid.Column="1" Tag="C" Cursor="SizeNWSE"
+                           DragDelta="TerminalResize_DragDelta" Template="{StaticResource TerminalGripTemplate}"/>
                 </Grid>
             </Border>
         </Grid>

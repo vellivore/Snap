@@ -111,6 +111,7 @@ public partial class MainWindow : Window
             new RelayCommand(() => ToggleFloatingTerminalAsync().SafeFireAndForget("MainWindow.Terminal", "ターミナルを開けません")),
             Key.T, ModifierKeys.Control));
         _viewModel.PaneFocusRequested += FocusPane;
+        _viewModel.ShowTerminal = allowFollow => ShowFloatingTerminalAsync(allowFollow);
 
         // The low-level hook lives exactly as long as the terminal is shown (#14).
         _viewModel.Terminal.PropertyChanged += (_, e) =>
@@ -291,6 +292,7 @@ public partial class MainWindow : Window
         // Hidden files and column widths, before the first listing (#17).
         ViewOptions.Load(_settings.ShowHidden, _settings.ColumnWidths);
         RestoreWindowState(_settings);
+        RestoreTerminalSettings(_settings.Terminal);
 
         // ブックマーク復元（初期化の await より前に。途中で閉じても空で上書きしない）
         _viewModel.FolderTree.LoadBookmarks(_settings.Bookmarks);
@@ -510,6 +512,14 @@ public partial class MainWindow : Window
         // Hidden files and column widths (#17)
         settings.ShowHidden = ViewOptions.ShowHidden;
         settings.ColumnWidths = ViewOptions.CaptureColumnWidths();
+
+        // Floating terminal (#18)
+        settings.Terminal = new TerminalSettings
+        {
+            Width = FloatingTerminalBorder.Width,
+            Height = FloatingTerminalBorder.Height,
+            FollowActivePane = _viewModel.Terminal.FollowActivePane,
+        };
 
         return settings;
     }
@@ -788,26 +798,45 @@ public partial class MainWindow : Window
 
     // ==================== Floating Terminal ====================
 
-    private async Task ToggleFloatingTerminalAsync()
+    private Task ToggleFloatingTerminalAsync()
+    {
+        var term = _viewModel.Terminal;
+        if (term.IsVisible)
+        {
+            // Hide only: the shell keeps running and comes back on the next open (#18).
+            term.Close();
+            return Task.CompletedTask;
+        }
+        return ShowFloatingTerminalAsync(allowFollow: true);
+    }
+
+    /// <summary>
+    /// Shows the terminal frame. A running shell (closed earlier) is shown again as it was, and
+    /// cd'd to the active folder when Terminal.FollowActivePane is on and <paramref name="allowFollow"/>;
+    /// otherwise a new shell starts in the active folder (#18).
+    /// </summary>
+    private async Task ShowFloatingTerminalAsync(bool allowFollow)
     {
         var term = _viewModel.Terminal;
 
-        if (term.IsVisible)
-        {
-            term.Close();
-            return;
-        }
-
-        // Sync current directory
-        var activeTab = _viewModel.ActiveTab;
-        if (activeTab != null)
-            term.CurrentDirectory = activeTab.CurrentPath;
+        // Sync current directory (used when a new shell starts)
+        var activeDir = _viewModel.ActiveTab?.CurrentPath;
+        if (!string.IsNullOrEmpty(activeDir))
+            term.CurrentDirectory = activeDir;
 
         // Make visible FIRST (the border is bound to IsVisible) so HwndHost gets initialized via layout
         term.IsVisible = true;
 
         // Wait for layout to complete (HwndHost.BuildWindowCore)
         await Dispatcher.InvokeAsync(() => { }, System.Windows.Threading.DispatcherPriority.Loaded);
+
+        if (term.IsShellRunning)
+        {
+            await EmbedTerminalAsync(term);
+            if (allowFollow && term.FollowActivePane && !string.IsNullOrEmpty(activeDir))
+                term.ChangeDirectory(activeDir, onlyIfChanged: true);
+            return;
+        }
 
         // Now start shell — host window handle is ready.
         // Unsubscribe first so a previous open that never raised ShellWindowReady (e.g. a
@@ -838,7 +867,9 @@ public partial class MainWindow : Window
 
         if (hostHwnd == IntPtr.Zero) return;
 
-        term.EmbedInto(hostHwnd);
+        // A shell shown again keeps its parent unless the host window was rebuilt.
+        if (term.EmbeddedHost != hostHwnd)
+            term.EmbedInto(hostHwnd);
 
         var w = (int)TerminalHost.ActualWidth;
         var h = (int)TerminalHost.ActualHeight;
@@ -860,5 +891,42 @@ public partial class MainWindow : Window
     private void TerminalClose_Click(object sender, RoutedEventArgs e)
     {
         _viewModel.Terminal.Close();
+    }
+
+    private const double TerminalMinWidth = 400;
+    private const double TerminalMinHeight = 200;
+
+    private void RestoreTerminalSettings(TerminalSettings? t)
+    {
+        t ??= new TerminalSettings();
+        _viewModel.Terminal.FollowActivePane = t.FollowActivePane;
+        FloatingTerminalBorder.Width = double.IsFinite(t.Width) ? Math.Max(TerminalMinWidth, t.Width) : 800;
+        FloatingTerminalBorder.Height = double.IsFinite(t.Height) ? Math.Max(TerminalMinHeight, t.Height) : 450;
+
+        // Never larger than the window: the layout caps the frame at its container, the saved
+        // size is kept for when the window grows again.
+        if (FloatingTerminalBorder.Parent is FrameworkElement container)
+        {
+            void Cap()
+            {
+                FloatingTerminalBorder.MaxWidth = Math.Max(TerminalMinWidth, container.ActualWidth);
+                FloatingTerminalBorder.MaxHeight = Math.Max(TerminalMinHeight, container.ActualHeight);
+            }
+            container.SizeChanged += (_, _) => Cap();
+            Cap();
+        }
+    }
+
+    /// <summary>Right / bottom / corner grips. The frame is centered, so its size changes by twice
+    /// the drag to keep the dragged edge under the mouse (#18). Saved on DragCompleted.</summary>
+    private void TerminalResize_DragDelta(object sender, System.Windows.Controls.Primitives.DragDeltaEventArgs e)
+    {
+        if (sender is not FrameworkElement grip) return;
+        var b = FloatingTerminalBorder;
+        var edge = grip.Tag as string;
+        if (edge is "R" or "C")
+            b.Width = Math.Clamp(b.ActualWidth + e.HorizontalChange * 2, TerminalMinWidth, Math.Max(TerminalMinWidth, b.MaxWidth));
+        if (edge is "B" or "C")
+            b.Height = Math.Clamp(b.ActualHeight + e.VerticalChange * 2, TerminalMinHeight, Math.Max(TerminalMinHeight, b.MaxHeight));
     }
 }

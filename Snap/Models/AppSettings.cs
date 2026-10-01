@@ -10,6 +10,10 @@ public class AppSettings
     /// <summary>Pinned folders. Name is the display name (renamable in the sidebar).</summary>
     public List<PathEntry> Bookmarks { get; set; } = new();
     public List<string> TodayFolders { get; set; } = new();
+    /// <summary>Show hidden files and folders in the lists and the tree (Ctrl+H, #17). Off by default.</summary>
+    public bool ShowHidden { get; set; }
+    /// <summary>File list column widths by column key (Name / LastModified / Size / Type), one set for all panes (#17).</summary>
+    public Dictionary<string, double> ColumnWidths { get; set; } = new();
 }
 
 public class WindowSettings

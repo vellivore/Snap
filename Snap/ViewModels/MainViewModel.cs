@@ -147,7 +147,8 @@ public partial class MainViewModel : ObservableObject
                 if (e.PropertyName == nameof(TabPaneViewModel.SelectedTab)) SettingsStore.MarkDirty();
             };
             WatchCollection(pane.Tabs,
-                nameof(FilePaneViewModel.CurrentPath), nameof(FilePaneViewModel.TabHeader));
+                nameof(FilePaneViewModel.CurrentPath), nameof(FilePaneViewModel.TabHeader),
+                nameof(FilePaneViewModel.SortColumn), nameof(FilePaneViewModel.SortAscending));
         }
         WatchCollection(FolderTree.Bookmarks, nameof(BookmarkItem.Name), nameof(BookmarkItem.FullPath));
         WatchCollection(Sidebar.TodayItems);
@@ -420,6 +421,22 @@ public partial class MainViewModel : ObservableObject
     private Task GoUp() => ActiveTab?.GoUpAsync() ?? Task.CompletedTask;
 
     /// <summary>
+    /// Ctrl+H / palette "hidden" (#17): shows or hides hidden files in every tab and in the
+    /// tree at once (saved in settings.json). The lists are filtered again in place; the tree
+    /// re-reads the folders it has loaded.
+    /// </summary>
+    [RelayCommand]
+    private async Task ToggleHidden()
+    {
+        ViewOptions.SetShowHidden(!ViewOptions.ShowHidden);
+        foreach (var tab in AllPanes.SelectMany(p => p.Tabs))
+            tab.ApplyShowHidden();
+        if (ActiveTab != null)
+            ActiveTab.StatusMessage = ViewOptions.ShowHidden ? "隠しファイルを表示します" : "隠しファイルを表示しません";
+        await FolderTree.ApplyShowHiddenAsync();
+    }
+
+    /// <summary>
     /// Opens <paramref name="path"/> in a new tab of the pane holding <paramref name="from"/>,
     /// right after it (folder middle-click / Ctrl+double-click, #14).
     /// </summary>
@@ -480,6 +497,7 @@ public partial class MainViewModel : ObservableObject
             return Task.CompletedTask;
         }),
         new("refresh", "Refresh", "\uE72C", () => CurrentPane.SelectedTab?.Refresh() ?? Task.CompletedTask),
+        new("hidden", "Show / Hide Hidden Files", "\uE7B3", ToggleHidden),
         new("settings", "Open settings.json", "\uE713", () =>
         {
             OpenSettingsFile();

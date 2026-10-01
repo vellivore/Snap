@@ -288,6 +288,8 @@ public partial class MainWindow : Window
     {
         _settings = SettingsStore.Load();
         SettingsStore.Capture = CaptureSettings;
+        // Hidden files and column widths, before the first listing (#17).
+        ViewOptions.Load(_settings.ShowHidden, _settings.ColumnWidths);
         RestoreWindowState(_settings);
 
         // ブックマーク復元（初期化の await より前に。途中で閉じても空で上書きしない）
@@ -504,6 +506,10 @@ public partial class MainWindow : Window
 
         // Sidebar state
         settings.TodayFolders = _viewModel.Sidebar.GetTodayPaths();
+
+        // Hidden files and column widths (#17)
+        settings.ShowHidden = ViewOptions.ShowHidden;
+        settings.ColumnWidths = ViewOptions.CaptureColumnWidths();
 
         return settings;
     }

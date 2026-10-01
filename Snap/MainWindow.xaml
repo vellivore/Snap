@@ -26,6 +26,7 @@
         <KeyBinding Gesture="Alt+Left" Command="{Binding GoBackCommand}"/>
         <KeyBinding Gesture="Alt+Right" Command="{Binding GoForwardCommand}"/>
         <KeyBinding Gesture="Alt+Up" Command="{Binding GoUpCommand}"/>
+        <KeyBinding Gesture="Ctrl+H" Command="{Binding ToggleHiddenCommand}"/>
     </Window.InputBindings>
 
     <Border Background="#BF181820" CornerRadius="8" BorderBrush="#50FFFFFF" BorderThickness="1">

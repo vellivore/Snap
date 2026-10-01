@@ -152,10 +152,22 @@
                     <GridViewColumn Header="名前 ^" Width="280">
                         <GridViewColumn.CellTemplate>
                             <DataTemplate>
-                                <StackPanel Orientation="Horizontal">
-                                    <Image Source="{Binding Icon}" Width="16" Height="16"
-                                           Margin="0,0,6,0" RenderOptions.BitmapScalingMode="NearestNeighbor"/>
-                                    <TextBlock Text="{Binding Name}" VerticalAlignment="Center"/>
+                                <StackPanel>
+                                    <StackPanel Orientation="Horizontal">
+                                        <Image Source="{Binding Icon}" Width="16" Height="16"
+                                               Margin="0,0,6,0" RenderOptions.BitmapScalingMode="NearestNeighbor"/>
+                                        <TextBlock Text="{Binding Name}" VerticalAlignment="Center"/>
+                                    </StackPanel>
+                                    <!-- PC view (#17): used-space bar and "空き X / Y" ("—" when not ready) -->
+                                    <StackPanel Orientation="Horizontal" Margin="22,1,0,2"
+                                                Visibility="{Binding IsDrive, Converter={StaticResource BoolToVis}}">
+                                        <ProgressBar Width="120" Height="6" Minimum="0" Maximum="100"
+                                                     Value="{Binding DriveUsedPercent, Mode=OneWay, TargetNullValue=0}"
+                                                     Visibility="{Binding HasDriveUsage, Converter={StaticResource BoolToVis}}"
+                                                     VerticalAlignment="Center" Margin="0,0,8,0"/>
+                                        <TextBlock Text="{Binding DriveSpaceText}" FontSize="11"
+                                                   Foreground="{StaticResource FgDimBrush}" VerticalAlignment="Center"/>
+                                    </StackPanel>
                                 </StackPanel>
                             </DataTemplate>
                         </GridViewColumn.CellTemplate>

@@ -151,54 +151,9 @@ public partial class FolderTreeViewModel : ObservableObject
 
         node.RemoveDummyChild();
 
+        var showHidden = ViewOptions.ShowHidden;
         var children = await Task.Run(() =>
-        {
-            var list = new List<TreeNode>();
-
-            // UNC server path → enumerate shares
-            if (FileSystemService.IsUncServerPath(node.FullPath))
-            {
-                try
-                {
-                    foreach (var share in FileSystemService.GetShares(node.FullPath))
-                        list.Add(CreateNode(share.Name, share.FullPath));
-                }
-                catch (Exception ex) { Log.Warn("FolderTree.Expand", $"share enumeration failed: {node.FullPath}", ex); }
-                return list;
-            }
-
-            try
-            {
-                var isNetwork = node.FullPath.StartsWith(@"\\");
-                foreach (var dir in Directory.EnumerateDirectories(node.FullPath))
-                {
-                    try
-                    {
-                        var name = Path.GetFileName(dir);
-                        // ネットワークパスでは属性チェックをスキップ（遅い+失敗しやすい）
-                        if (!isNetwork)
-                        {
-                            var attrs = File.GetAttributes(dir);
-                            if ((attrs & FileAttributes.Hidden) != 0 || (attrs & FileAttributes.System) != 0)
-                                continue;
-                        }
-
-                        list.Add(CreateNode(name, dir));
-                    }
-                    catch (Exception ex)
-                    {
-                        // アクセス拒否等は無視
-                        Log.Warn("FolderTree.Expand", $"skip: {dir}", ex);
-                    }
-                }
-            }
-            catch (Exception ex)
-            {
-                // 親ディレクトリのアクセス拒否等
-                Log.Warn("FolderTree.Expand", $"enumeration failed: {node.FullPath}", ex);
-            }
-            return list;
-        });
+            ListChildFolders(node.FullPath, showHidden).Select(c => CreateNode(c.Name, c.Path)).ToList());
 
         // Text first, in one step (#16): every child shows the generic folder icon and the real
         // icons come from the icon worker (not for network paths: no network access for icons).
@@ -211,10 +166,139 @@ public partial class FolderTreeViewModel : ObservableObject
     }
 
     /// <summary>
+    /// The subfolders of <paramref name="path"/> shown in the tree (thread pool): the shares of
+    /// \\server, else the folders, without hidden ones unless <paramref name="showHidden"/> (#17).
+    /// Failures are logged and give what could be read.
+    /// </summary>
+    private static List<(string Name, string Path)> ListChildFolders(string path, bool showHidden)
+    {
+        var list = new List<(string Name, string Path)>();
+
+        // UNC server path → enumerate shares
+        if (FileSystemService.IsUncServerPath(path))
+        {
+            try
+            {
+                foreach (var share in FileSystemService.GetShares(path))
+                    list.Add((share.Name, share.FullPath));
+            }
+            catch (Exception ex) { Log.Warn("FolderTree.Expand", $"share enumeration failed: {path}", ex); }
+            return list;
+        }
+
+        try
+        {
+            // ネットワークパスでは属性チェックをスキップ（遅い+失敗しやすい）。
+            // Hidden only, as in the file list (#17); before, System-only folders were hidden too.
+            var isNetwork = path.StartsWith(@"\\");
+            foreach (var dir in new DirectoryInfo(path).EnumerateDirectories())
+            {
+                try
+                {
+                    if (!showHidden && !isNetwork && (dir.Attributes & FileAttributes.Hidden) != 0)
+                        continue;
+                    list.Add((dir.Name, dir.FullName));
+                }
+                catch (Exception ex)
+                {
+                    // アクセス拒否等は無視
+                    Log.Warn("FolderTree.Expand", $"skip: {dir.FullName}", ex);
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            // 親ディレクトリのアクセス拒否等
+            Log.Warn("FolderTree.Expand", $"enumeration failed: {path}", ex);
+        }
+        return list;
+    }
+
+    /// <summary>
+    /// Hidden files were switched on / off (Ctrl+H, #17): every folder whose children are loaded
+    /// gets them again. Nodes still listed are kept (expanded state, selection); hidden ones are
+    /// added or removed one by one, never a Reset (a re-created selected item would raise
+    /// Selected and move the active pane, see <see cref="RefreshDrivesAsync"/>).
+    /// </summary>
+    public async Task ApplyShowHiddenAsync()
+    {
+        // Adding / removing nodes re-prepares the item containers around them, and a re-prepared
+        // container of the selected node raises Selected again (from its IsSelected binding), which
+        // would move the active pane to that folder. Selections are ignored until the tree has been
+        // laid out after the change.
+        _ignoreSelectionDepth++;
+        try { await ApplyShowHiddenCoreAsync(); }
+        finally
+        {
+            System.Windows.Application.Current?.Dispatcher.BeginInvoke(
+                System.Windows.Threading.DispatcherPriority.ContextIdle, () => _ignoreSelectionDepth--);
+        }
+    }
+
+    // > 0 while ApplyShowHiddenAsync changes the nodes (until the layout after it).
+    private int _ignoreSelectionDepth;
+
+    private async Task ApplyShowHiddenCoreAsync()
+    {
+        var showHidden = ViewOptions.ShowHidden;
+        var loaded = new List<TreeNode>();
+        void Collect(IEnumerable<TreeNode> nodes)
+        {
+            foreach (var n in nodes)
+            {
+                if (n.FullPath == "__dummy__" || n.HasDummyChild) continue;
+                if (n.FullPath != FilePaneViewModel.PcViewPath && !FileSystemService.IsUncServerPath(n.FullPath))
+                    loaded.Add(n);
+                Collect(n.Children);
+            }
+        }
+        Collect(RootNodes);
+
+        var paths = loaded.Select(n => n.FullPath).ToList();
+        var lists = await Task.Run(() => paths.Select(p => ListChildFolders(p, showHidden)).ToList());
+
+        var folderIcon = IconHelper.GetDefaultFolderIcon().icon;
+        var added = 0;
+        var removed = 0;
+        for (int n = 0; n < loaded.Count; n++)
+        {
+            var node = loaded[n];
+            var wanted = lists[n];
+            var children = node.Children;
+            var wantedPaths = new HashSet<string>(wanted.Select(w => w.Path), StringComparer.OrdinalIgnoreCase);
+            for (int i = children.Count - 1; i >= 0; i--)
+                if (!wantedPaths.Contains(children[i].FullPath)) { children.RemoveAt(i); removed++; }
+
+            var newNodes = new List<TreeNode>();
+            for (int i = 0; i < wanted.Count; i++)
+            {
+                var at = -1;
+                for (int j = i; j < children.Count; j++)
+                    if (FileSystemService.SamePath(children[j].FullPath, wanted[i].Path)) { at = j; break; }
+                if (at == i) continue;
+                if (at > i) { children.Move(at, i); continue; }
+                var created = CreateNode(wanted[i].Name, wanted[i].Path);
+                created.Icon = folderIcon;
+                children.Insert(Math.Min(i, children.Count), created);
+                newNodes.Add(created);
+                added++;
+            }
+            if (newNodes.Count > 0 && !FileSystemService.IsNetworkPath(node.FullPath))
+                IconHelper.QueuePathIcons(newNodes, c => c.FullPath, (c, icon) => c.Icon = icon);
+        }
+        Log.Info("FolderTree.Hidden", $"show hidden = {showHidden}: {loaded.Count} loaded folders, {added} added, {removed} removed");
+    }
+
+    /// <summary>
     /// ツリーからユーザーがクリックして選択した場合
     /// </summary>
     public void OnNodeSelected(TreeNode node)
     {
+        if (_ignoreSelectionDepth > 0)
+        {
+            Log.Info("FolderTree.Select", $"ignored while hidden files are re-applied: {node.FullPath}");
+            return;
+        }
         if (node.FullPath != "__dummy__")
         {
             // The pane navigation triggered by FolderSelected completes asynchronously,

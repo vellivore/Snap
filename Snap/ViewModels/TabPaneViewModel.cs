@@ -43,6 +43,8 @@ public partial class TabPaneViewModel : ObservableObject
             if (!string.IsNullOrWhiteSpace(entry.Name)
                 && string.Equals(tab.CurrentPath, entry.Path, StringComparison.OrdinalIgnoreCase))
                 tab.SetCustomTabHeader(entry.Name);
+            // The tab's saved sort (#17); null keeps the default.
+            tab.RestoreSort(entry.SortColumn, entry.SortAscending);
             if (_usageTracker != null) tab.SetUsageTracker(_usageTracker);
             Tabs.Add(tab);
             tasks.Add(tab.InitializeAsync());
@@ -55,11 +57,16 @@ public partial class TabPaneViewModel : ObservableObject
         await Task.WhenAll(tasks);
     }
 
-    /// <summary>Returns tabs ({path, custom name}) and active index for settings persistence.</summary>
+    /// <summary>Returns tabs ({path, custom name, sort}) and active index for settings persistence.
+    /// The default sort (name, ascending) is not written.</summary>
     public (List<PathEntry> Tabs, int ActiveIndex) GetTabState()
     {
         var tabs = Tabs
-            .Select(t => new PathEntry(t.CurrentPath, t.HasCustomTabHeader ? t.TabHeader : null))
+            .Select(t => new PathEntry(t.CurrentPath, t.HasCustomTabHeader ? t.TabHeader : null)
+            {
+                SortColumn = t.HasDefaultSort ? null : t.SortColumn,
+                SortAscending = t.HasDefaultSort ? null : t.SortAscending,
+            })
             .ToList();
         var index = SelectedTab != null ? Tabs.IndexOf(SelectedTab) : 0;
         return (tabs, Math.Max(index, 0));

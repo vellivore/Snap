@@ -13,6 +13,10 @@ public sealed class PathEntry
 {
     public string Path { get; set; } = "";
     public string? Name { get; set; }
+    /// <summary>Tab sort column (Name / LastModified / Size / Type); null = the default (#17).</summary>
+    public string? SortColumn { get; set; }
+    /// <summary>Tab sort direction; null = the default (ascending) (#17).</summary>
+    public bool? SortAscending { get; set; }
 
     public PathEntry() { }
 
@@ -47,6 +51,15 @@ public sealed class PathEntryConverter : JsonConverter<PathEntry>
                         entry.Path = reader.TokenType == JsonTokenType.String ? reader.GetString() ?? "" : "";
                     else if (string.Equals(prop, "name", StringComparison.OrdinalIgnoreCase))
                         entry.Name = reader.TokenType == JsonTokenType.String ? reader.GetString() : null;
+                    else if (string.Equals(prop, "sortColumn", StringComparison.OrdinalIgnoreCase))
+                        entry.SortColumn = reader.TokenType == JsonTokenType.String ? reader.GetString() : null;
+                    else if (string.Equals(prop, "sortAscending", StringComparison.OrdinalIgnoreCase))
+                        entry.SortAscending = reader.TokenType switch
+                        {
+                            JsonTokenType.True => true,
+                            JsonTokenType.False => false,
+                            _ => null,
+                        };
                     else
                         reader.Skip();
                 }
@@ -62,6 +75,10 @@ public sealed class PathEntryConverter : JsonConverter<PathEntry>
         writer.WriteString("path", value.Path);
         if (!string.IsNullOrEmpty(value.Name))
             writer.WriteString("name", value.Name);
+        if (!string.IsNullOrEmpty(value.SortColumn))
+            writer.WriteString("sortColumn", value.SortColumn);
+        if (value.SortAscending is bool asc)
+            writer.WriteBoolean("sortAscending", asc);
         writer.WriteEndObject();
     }
 }

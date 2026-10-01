@@ -69,8 +69,33 @@ public partial class FilePaneViewModel : ObservableObject, IDisposable
     public IReadOnlyList<FileItem> SelectedItems { get; private set; } = [];
 
     /// <summary>Called by the view whenever the list's selection changes.</summary>
-    public void SetSelection(System.Collections.IList selectedItems) =>
+    public void SetSelection(System.Collections.IList selectedItems)
+    {
         SelectedItems = SelectedInListOrder(selectedItems);
+        SelectionSummary = BuildSelectionSummary(SelectedItems);
+        ShowCountStatus();
+    }
+
+    /// <summary>
+    /// The selection for the status bar (#17): "3 件選択 / 12.4 MB". Folders are not counted in
+    /// the size: "3 件選択（うちフォルダー 1） / 12.4 MB", and only folders gives no size.
+    /// In the PC view just "1 件選択". Empty when nothing is selected.
+    /// </summary>
+    [ObservableProperty]
+    private string _selectionSummary = string.Empty;
+
+    private string BuildSelectionSummary(IReadOnlyList<FileItem> items)
+    {
+        if (items.Count == 0) return string.Empty;
+        var text = $"{items.Count} 件選択";
+        if (CurrentPath == PcViewPath) return text;
+
+        var folders = items.Count(i => i.IsDirectory);
+        if (folders > 0) text += $"（うちフォルダー {folders}）";
+        if (folders < items.Count)
+            text += $" / {FileItem.FormatSize(items.Where(i => !i.IsDirectory).Sum(i => i.Size))}";
+        return text;
+    }
 
     // ==================== Host (#15) ====================
     // Set by MainViewModel when the tab joins a pane.
@@ -143,8 +168,69 @@ public partial class FilePaneViewModel : ObservableObject, IDisposable
         if (skipped is int s) _skipped = s;
         var count = string.IsNullOrEmpty(FilterText)
             ? $"{Items.Count} 項目"
-            : $"{Items.Count} / {_allItems.Count} 項目（絞り込み: {FilterText}）";
-        StatusMessage = _skipped > 0 ? $"{count}（読めない項目 {_skipped} 件を省略）" : count;
+            : $"{Items.Count} / {_allItems.Count(IsListed)} 項目（絞り込み: {FilterText}）";
+        _countText = _skipped > 0 ? $"{count}（読めない項目 {_skipped} 件を省略）" : count;
+        ShowCountStatus();
+    }
+
+    // ==================== Status line (#17) ====================
+    // StatusMessage shows either the count line ("N 項目" plus the selection) or a message (an
+    // operation result, an error). A message is kept for MessageHold before the count line comes
+    // back, so a refresh or the folder watcher right after "貼り付けました" does not wipe it out.
+
+    private static readonly TimeSpan MessageHold = TimeSpan.FromSeconds(5);
+    private string _countText = string.Empty;
+    private System.Windows.Threading.DispatcherTimer? _messageTimer;
+    private bool _settingCountStatus;
+
+    /// <summary>The count line: "120 項目　　3 件選択 / 12.4 MB".</summary>
+    private string ComposeCountStatus() =>
+        string.IsNullOrEmpty(SelectionSummary) ? _countText : $"{_countText}　　{SelectionSummary}";
+
+    /// <summary>Shows the count line, unless a message is being held.</summary>
+    private void ShowCountStatus()
+    {
+        if (_messageTimer?.IsEnabled == true) return;
+        SetCountStatus(ComposeCountStatus());
+    }
+
+    /// <summary>Sets <see cref="StatusMessage"/> without it being held as a message.</summary>
+    private void SetCountStatus(string text)
+    {
+        _settingCountStatus = true;
+        try { StatusMessage = text; }
+        finally { _settingCountStatus = false; }
+    }
+
+    /// <summary>Drops a held message (a navigation the user started shows its own state at once).</summary>
+    private void EndHeldMessage() => _messageTimer?.Stop();
+
+    partial void OnStatusMessageChanged(string value)
+    {
+        if (_settingCountStatus || _disposed) return;
+        var dispatcher = Application.Current?.Dispatcher;
+        if (dispatcher == null) return;
+        if (!dispatcher.CheckAccess())
+        {
+            dispatcher.BeginInvoke(HoldMessage);
+            return;
+        }
+        HoldMessage();
+    }
+
+    private void HoldMessage()
+    {
+        if (_messageTimer == null)
+        {
+            _messageTimer = new System.Windows.Threading.DispatcherTimer { Interval = MessageHold };
+            _messageTimer.Tick += (_, _) =>
+            {
+                _messageTimer.Stop();
+                if (!_disposed) SetCountStatus(ComposeCountStatus());
+            };
+        }
+        _messageTimer.Stop();
+        _messageTimer.Start();
     }
 
     // Sorting state
@@ -153,6 +239,36 @@ public partial class FilePaneViewModel : ObservableObject, IDisposable
 
     public string SortColumn => _sortColumn;
     public bool SortAscending => _sortAscending;
+
+    /// <summary>The columns a tab can be sorted by (also the keys of the saved column widths).</summary>
+    public static readonly IReadOnlyList<string> SortColumns = ["Name", "LastModified", "Size", "Type"];
+
+    /// <summary>Restores a saved sort (#17) before the tab is first listed. Unknown or null values
+    /// keep the default (Name, ascending).</summary>
+    public void RestoreSort(string? column, bool? ascending)
+    {
+        if (column != null && SortColumns.Contains(column))
+            _sortColumn = column;
+        if (ascending is bool asc)
+            _sortAscending = asc;
+        OnPropertyChanged(nameof(SortColumn));
+        OnPropertyChanged(nameof(SortAscending));
+    }
+
+    /// <summary>True when the sort is the default one (not written to settings).</summary>
+    public bool HasDefaultSort => _sortColumn == "Name" && _sortAscending;
+
+    /// <summary>Hidden files were switched on / off (Ctrl+H, #17): the rows are filtered again
+    /// in place (selection and scroll position stay).</summary>
+    public void ApplyShowHidden()
+    {
+        if (_disposed) return;
+        ApplySortToItems(keepView: true);
+        UpdateItemCountStatus();
+    }
+
+    /// <summary>Listed under the current hidden-files setting.</summary>
+    private static bool IsListed(FileItem item) => !item.IsHidden || ViewOptions.ShowHidden;
 
     // Navigation history
     private readonly List<string> _history = new();
@@ -246,7 +362,9 @@ public partial class FilePaneViewModel : ObservableObject, IDisposable
         var timing = Stopwatch.StartNew();
 
         IsLoading = true;
-        StatusMessage = "読み込み中...";
+        // A navigation shows its own state at once (a message still held from before is dropped).
+        EndHeldMessage();
+        SetCountStatus("読み込み中...");
 
         try
         {
@@ -282,6 +400,12 @@ public partial class FilePaneViewModel : ObservableObject, IDisposable
                 }
                 // Same folder (F5, after a file operation): keep the selection and scroll position.
                 ApplySortToItems(keepView: !pathChanged);
+                if (pathChanged)
+                {
+                    // The view clears the selection of a new folder; do not show the old one meanwhile.
+                    SelectedItems = [];
+                    SelectionSummary = string.Empty;
+                }
                 CurrentPath = path;
                 if (pathChanged || !HasCustomTabHeader)
                     ResetTabHeader();
@@ -934,6 +1058,7 @@ public partial class FilePaneViewModel : ObservableObject, IDisposable
         foreach (var drive in drives)
         {
             var (icon, _) = IconHelper.GetIconAndType(drive.RootPath, true);
+            var known = drive.FreeSpace.HasValue && drive.TotalSize > 0;
             items.Add(new FileItem
             {
                 Name = drive.Label,
@@ -943,6 +1068,14 @@ public partial class FilePaneViewModel : ObservableObject, IDisposable
                 IsDirectory = true,
                 Type = drive.TypeName,
                 Icon = icon,
+                IsDrive = true,
+                // Not ready / unreadable: "—" and no bar (#17).
+                DriveSpaceText = known
+                    ? $"空き {FileItem.FormatSize(drive.FreeSpace!.Value)} / {FileItem.FormatSize(drive.TotalSize)}"
+                    : "—",
+                DriveUsedPercent = known
+                    ? Math.Clamp(100.0 * (drive.TotalSize - drive.FreeSpace!.Value) / drive.TotalSize, 0, 100)
+                    : null,
             });
         }
         return new LoadResult(items, skipped);
@@ -984,6 +1117,7 @@ public partial class FilePaneViewModel : ObservableObject, IDisposable
                     FullPath = dir.FullName,
                     LastModified = dir.LastWriteTime,
                     IsDirectory = true,
+                    IsHidden = (dir.Attributes & FileAttributes.Hidden) != 0,
                     Type = typeName,
                     Icon = icon,
                 });
@@ -1008,6 +1142,7 @@ public partial class FilePaneViewModel : ObservableObject, IDisposable
                     LastModified = file.LastWriteTime,
                     Size = file.Length,
                     IsDirectory = false,
+                    IsHidden = (file.Attributes & FileAttributes.Hidden) != 0,
                     Type = typeName,
                     Icon = icon,
                 });
@@ -1072,7 +1207,7 @@ public partial class FilePaneViewModel : ObservableObject, IDisposable
     /// <summary>The filtered, sorted rows (folders first).</summary>
     private List<FileItem> BuildSortedView()
     {
-        IEnumerable<FileItem> source = _allItems;
+        IEnumerable<FileItem> source = _allItems.Where(IsListed);
         if (!string.IsNullOrEmpty(FilterText))
             source = source.Where(i => i.Name.Contains(FilterText, StringComparison.OrdinalIgnoreCase));
 
@@ -1199,10 +1334,12 @@ public partial class FilePaneViewModel : ObservableObject, IDisposable
                 && string.Equals(existing.Name, fresh.Name, StringComparison.Ordinal))
             {
                 // Same entry: update in place (the row and its selection stay).
-                if (existing.LastModified != fresh.LastModified || existing.Size != fresh.Size)
+                if (existing.LastModified != fresh.LastModified || existing.Size != fresh.Size
+                    || existing.IsHidden != fresh.IsHidden)
                 {
                     existing.LastModified = fresh.LastModified;
                     existing.Size = fresh.Size;
+                    existing.IsHidden = fresh.IsHidden;
                     touched.Add(existing);
                 }
                 continue;
@@ -1248,6 +1385,7 @@ public partial class FilePaneViewModel : ObservableObject, IDisposable
                     FullPath = dir.FullName,
                     LastModified = dir.LastWriteTime,
                     IsDirectory = true,
+                    IsHidden = (dir.Attributes & FileAttributes.Hidden) != 0,
                     Type = typeName,
                     Icon = icon,
                 };
@@ -1263,6 +1401,7 @@ public partial class FilePaneViewModel : ObservableObject, IDisposable
                     LastModified = file.LastWriteTime,
                     Size = file.Length,
                     IsDirectory = false,
+                    IsHidden = (file.Attributes & FileAttributes.Hidden) != 0,
                     Type = typeName,
                     Icon = icon,
                 };
@@ -1346,6 +1485,7 @@ public partial class FilePaneViewModel : ObservableObject, IDisposable
     {
         if (_disposed) return;
         _disposed = true;
+        _messageTimer?.Stop();
         _watcher.Dispose();
         _iconCts.Cancel();
         _iconCts.Dispose();

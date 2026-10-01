@@ -70,6 +70,54 @@ public partial class FilePaneControl : UserControl
         DataContextChanged += OnDataContextChanged;
         AddHandler(GridViewColumnHeader.ClickEvent, new RoutedEventHandler(ColumnHeader_Click));
         TrackListFocus();
+        TrackColumnWidths();
+    }
+
+    // ==================== Column widths (#17) ====================
+    // One set of widths for every pane, saved in settings.json (ViewOptions). Applied when the
+    // saved widths are loaded; a resize in any pane becomes the saved width.
+
+    private bool _applyingWidths;
+
+    /// <summary>The column's key (Name / LastModified / Size / Type) from its header text.</summary>
+    private static string? ColumnKey(GridViewColumn col) =>
+        ColumnMap.TryGetValue((col.Header?.ToString() ?? "").TrimEnd(' ', '^', 'v'), out var key) ? key : null;
+
+    private void TrackColumnWidths()
+    {
+        if (FileListView.View is not GridView gridView) return;
+        var widthProperty = DependencyPropertyDescriptor.FromProperty(GridViewColumn.WidthProperty, typeof(GridViewColumn));
+        foreach (var col in gridView.Columns)
+        {
+            var column = col;
+            widthProperty.AddValueChanged(column, (_, _) => OnColumnWidthChanged(column));
+        }
+        ViewOptions.ColumnWidthsLoaded += ApplyColumnWidths;
+        ApplyColumnWidths();
+    }
+
+    private void ApplyColumnWidths()
+    {
+        if (FileListView.View is not GridView gridView) return;
+        _applyingWidths = true;
+        try
+        {
+            foreach (var col in gridView.Columns)
+                if (ColumnKey(col) is { } key && ViewOptions.ColumnWidths.TryGetValue(key, out var width))
+                    col.Width = width;
+        }
+        finally { _applyingWidths = false; }
+    }
+
+    private void OnColumnWidthChanged(GridViewColumn column)
+    {
+        if (_applyingWidths || ColumnKey(column) is not { } key) return;
+        // Double-clicking the gripper sizes to content: Width is NaN and the real width comes after layout.
+        if (double.IsNaN(column.Width))
+            Dispatcher.BeginInvoke(System.Windows.Threading.DispatcherPriority.Loaded,
+                () => ViewOptions.SetColumnWidth(key, column.ActualWidth));
+        else
+            ViewOptions.SetColumnWidth(key, column.Width);
     }
 
     private FilePaneViewModel? ViewModel => DataContext as FilePaneViewModel;
@@ -134,6 +182,8 @@ public partial class FilePaneControl : UserControl
             newVm.ItemsReplaced += OnItemsReplaced;
             RebuildBreadcrumb(newVm.CurrentPath);
             _shownPath = newVm.CurrentPath;
+            // Each tab has its own sort (#17): the header arrow follows the tab shown.
+            UpdateSortIndicators();
             // Tab switch (Ctrl+Tab etc.): if the list had the focus, it keeps it.
             if (ListShouldKeepFocus())
                 FocusListAfterLayout(select: null);
@@ -158,6 +208,10 @@ public partial class FilePaneControl : UserControl
                     : null;
                 FocusListAfterLayout(cameFrom, newFolder: true);
             }
+        }
+        else if (e.PropertyName is nameof(FilePaneViewModel.SortColumn) or nameof(FilePaneViewModel.SortAscending))
+        {
+            UpdateSortIndicators();
         }
         else if (e.PropertyName == nameof(FilePaneViewModel.IsFilterVisible) && vm.IsFilterVisible)
         {

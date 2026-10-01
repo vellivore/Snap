@@ -9,7 +9,8 @@ namespace Snap.Services;
 /// </summary>
 public static class FileSystemService
 {
-    public sealed record DriveEntry(string RootPath, string Label, string TypeName, long TotalSize);
+    /// <param name="FreeSpace">Space available to the user; null when the drive is not ready or cannot be read (#17).</param>
+    public sealed record DriveEntry(string RootPath, string Label, string TypeName, long TotalSize, long? FreeSpace = null);
 
     public sealed record ShareEntry(string Name, string FullPath, string Remark);
 
@@ -39,7 +40,25 @@ public static class FileSystemService
                     DriveType.Ram => "RAM ディスク",
                     _ => "ドライブ",
                 };
-                list.Add(new DriveEntry(drive.Name, label, typeName, ready ? drive.TotalSize : 0));
+                // Space of a drive that is not ready (empty card reader, disconnected network
+                // drive) cannot be read: the PC view shows "—" for it instead of dropping it (#17).
+                long total = 0;
+                long? free = null;
+                if (ready)
+                {
+                    try
+                    {
+                        total = drive.TotalSize;
+                        free = drive.AvailableFreeSpace;
+                    }
+                    catch (Exception sx)
+                    {
+                        total = 0;
+                        free = null;
+                        Log.Warn("FileSystem.Drives", $"{drive.Name}: space unavailable", sx);
+                    }
+                }
+                list.Add(new DriveEntry(drive.Name, label, typeName, total, free));
             }
             catch (Exception ex)
             {
